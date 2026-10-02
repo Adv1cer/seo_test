@@ -186,3 +186,20 @@ def test_report_endpoint(utcc_html):
     assert data["audit"]["score"] == client.post("/api/seo/audit", json=body).json()["data"]["audit"]["score"]
     raw = client.post("/api/seo/report?format=markdown", json=body)
     assert raw.headers["content-type"].startswith("text/markdown") and raw.text == md
+
+
+def test_lenient_body_formats():
+    import json
+    from urllib.parse import urlencode
+    payload = {"url": URL, "html": "<title>x</title><h1>x</h1>"}
+    as_string = client.post("/api/seo/audit", content=json.dumps(json.dumps(payload)),
+                            headers={"content-type": "application/json"})
+    no_ctype = client.post("/api/seo/audit", content=json.dumps(payload), headers={"content-type": "text/plain"})
+    form = client.post("/api/seo/audit", content=urlencode(payload),
+                       headers={"content-type": "application/x-www-form-urlencoded"})
+    assert as_string.status_code == no_ctype.status_code == form.status_code == 200
+    bad = client.post("/api/seo/audit", content='{"url": "x", "html": "<a href="x">"}',
+                      headers={"content-type": "application/json"})
+    assert bad.status_code == 422 and "not valid JSON" in bad.text
+    arr = client.post("/api/seo/audit", json=[1])
+    assert arr.status_code == 422 and "got list" in arr.text

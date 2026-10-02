@@ -1,7 +1,11 @@
+import json
 from typing import Literal
+from urllib.parse import parse_qs
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import PlainTextResponse
+from pydantic import ValidationError
 
 from app.models.request import SeoRequest
 from app.models.response import AuditData, AuditResponse, PageSummary, ParseResponse
@@ -12,8 +16,34 @@ from app.services.seo_auditor import audit_page
 router = APIRouter(prefix="/api/seo", tags=["seo"])
 
 
+def _body_error(msg: str) -> RequestValidationError:
+    return RequestValidationError([{"loc": ("body",), "msg": msg, "type": "body_invalid"}])
+
+
+async def read_seo_request(request: Request) -> SeoRequest:
+    """Lenient body reader for workflow tools: accepts a JSON object, a JSON object
+    double-encoded as a JSON string, or urlencoded form data, with any Content-Type."""
+    raw = await request.body()
+    if "application/x-www-form-urlencoded" in request.headers.get("content-type", ""):
+        data = {k: v[0] for k, v in parse_qs(raw.decode("utf-8", "replace")).items()}
+    else:
+        try:
+            data = json.loads(raw) if raw.strip() else None
+            if isinstance(data, str):  # body was sent as a JSON string containing JSON
+                data = json.loads(data)
+        except ValueError as exc:
+            raise _body_error(f"Body is not valid JSON ({exc.msg} at char {exc.pos}). "
+                              "Check that html is inserted as a JSON-escaped string.")
+    if not isinstance(data, dict):
+        raise _body_error(f'Expected a JSON object {{"url": ..., "html": ...}}; got {type(data).__name__}.')
+    try:
+        return SeoRequest.model_validate(data)
+    except ValidationError as exc:
+        raise RequestValidationError([{**e, "loc": ("body", *e["loc"])} for e in exc.errors()])
+
+
 @router.post("/parse", response_model=ParseResponse)
-def parse(req: SeoRequest) -> ParseResponse:
+def parse(req: SeoRequest = Depends(read_seo_request)) -> ParseResponse:
     return ParseResponse(data=parse_html(req.url, req.html))
 
 
@@ -23,12 +53,12 @@ def _audit_data(page) -> AuditData:
 
 
 @router.post("/audit", response_model=AuditResponse)
-def audit(req: SeoRequest) -> AuditResponse:
+def audit(req: SeoRequest = Depends(read_seo_request)) -> AuditResponse:
     return AuditResponse(data=_audit_data(parse_html(req.url, req.html)))
 
 
 @router.post("/report")
-def report(req: SeoRequest, format: Literal["json", "markdown"] = "json"):
+def report(req: SeoRequest = Depends(read_seo_request), format: Literal["json", "markdown"] = "json"):
     """Audit + human-readable Markdown report. format=markdown returns the raw report text."""
     page = parse_html(req.url, req.html)
     data = _audit_data(page)
