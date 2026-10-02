@@ -215,3 +215,10 @@ def test_raw_html_body_with_query_url(utcc_html):
 def test_unresolved_template_rejected():
     r = client.post("/api/seo/report", params={"url": URL}, content=b"{{WebScraping.html}}")
     assert r.status_code == 422 and "{{WebScraping.html}}" in r.text
+
+
+def test_url_errors_echo_value_and_whitespace_tolerated():
+    r = client.post("/api/seo/audit", params={"url": "{{WebScraping.url}}"}, content=b"<p>x</p>")
+    assert r.status_code == 422 and "{{WebScraping.url}}" in r.text
+    r = client.post("/api/seo/audit", params={"url": "https:// www.utcc.ac.th/"}, content=b"<p>x</p>")
+    assert r.status_code == 200 and r.json()["data"]["page"]["url"] == "https://www.utcc.ac.th/"

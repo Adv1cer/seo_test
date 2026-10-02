@@ -11,9 +11,10 @@ class SeoRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def _url(cls, v: str) -> str:
-        v = v.strip()
+        received = v
+        v = "".join(v.split())  # URLs never contain whitespace; tolerate "https:// www.x"
         if not is_web_url(v):
-            raise ValueError("url must be an absolute http(s) URL")
+            raise ValueError(f"url must be an absolute http(s) URL (received: {received[:200]!r})")
         return v
 
     @field_validator("html")
