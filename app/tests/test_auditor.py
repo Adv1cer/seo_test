@@ -210,3 +210,8 @@ def test_raw_html_body_with_query_url(utcc_html):
                     content=utcc_html.encode("utf-8"), headers={"content-type": "application/json"})
     assert r.status_code == 200
     assert "CANONICAL_PRIVATE_IP" in r.json()["data"]["report_markdown"]
+
+
+def test_unresolved_template_rejected():
+    r = client.post("/api/seo/report", params={"url": URL}, content=b"{{WebScraping.html}}")
+    assert r.status_code == 422 and "{{WebScraping.html}}" in r.text

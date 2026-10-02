@@ -23,4 +23,7 @@ class SeoRequest(BaseModel):
             raise ValueError("html must not be empty")
         if len(v.encode("utf-8")) > settings.max_html_bytes:
             raise ValueError(f"html exceeds {settings.max_html_bytes} bytes")
+        if "<" not in v:  # catches unresolved workflow templates like "{{node.html}}"
+            raise ValueError(f"html does not look like HTML (received: {v.strip()[:100]!r}). "
+                             "Check that the workflow variable was substituted.")
         return v
