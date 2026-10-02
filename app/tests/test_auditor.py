@@ -203,3 +203,10 @@ def test_lenient_body_formats():
     assert bad.status_code == 422 and "not valid JSON" in bad.text
     arr = client.post("/api/seo/audit", json=[1])
     assert arr.status_code == 422 and "got list" in arr.text
+
+
+def test_raw_html_body_with_query_url(utcc_html):
+    r = client.post("/api/seo/report", params={"url": "https://ai.utcc.ac.th/th"},
+                    content=utcc_html.encode("utf-8"), headers={"content-type": "application/json"})
+    assert r.status_code == 200
+    assert "CANONICAL_PRIVATE_IP" in r.json()["data"]["report_markdown"]

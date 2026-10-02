@@ -22,9 +22,13 @@ def _body_error(msg: str) -> RequestValidationError:
 
 async def read_seo_request(request: Request) -> SeoRequest:
     """Lenient body reader for workflow tools: accepts a JSON object, a JSON object
-    double-encoded as a JSON string, or urlencoded form data, with any Content-Type."""
+    double-encoded as a JSON string, urlencoded form data, or raw HTML with ?url=...
+    (any Content-Type)."""
     raw = await request.body()
-    if "application/x-www-form-urlencoded" in request.headers.get("content-type", ""):
+    query_url = request.query_params.get("url")
+    if query_url:  # ?url=... → body is the raw HTML itself (no JSON escaping needed)
+        data = {"url": query_url, "html": raw.decode("utf-8", "replace")}
+    elif "application/x-www-form-urlencoded" in request.headers.get("content-type", ""):
         data = {k: v[0] for k, v in parse_qs(raw.decode("utf-8", "replace")).items()}
     else:
         try:
@@ -33,7 +37,7 @@ async def read_seo_request(request: Request) -> SeoRequest:
                 data = json.loads(data)
         except ValueError as exc:
             raise _body_error(f"Body is not valid JSON ({exc.msg} at char {exc.pos}). "
-                              "Check that html is inserted as a JSON-escaped string.")
+                              "Either JSON-escape html, or send raw HTML as the body with ?url=<page url>.")
     if not isinstance(data, dict):
         raise _body_error(f'Expected a JSON object {{"url": ..., "html": ...}}; got {type(data).__name__}.')
     try:
