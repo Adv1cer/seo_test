@@ -1,0 +1,21 @@
+# Ruflo local secrets and runtime data
+.env
+.env.local
+.env.*.local
+.claude-flow/data/
+.claude-flow/logs/
+.claude-flow/sessions/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Local AI tooling (not needed on the server)
+.claude/
+.claude-flow/
+.swarm/
+.mcp.json
+CLAUDE.md
+$result*
