@@ -28,3 +28,16 @@ class SeoRequest(BaseModel):
             raise ValueError(f"html does not look like HTML (received: {v.strip()[:100]!r}). "
                              "Check that the workflow variable was substituted.")
         return v
+
+
+class UrlRequest(BaseModel):
+    url: str = Field(..., description="Absolute http(s) URL to fetch and analyze")
+
+    @field_validator("url")
+    @classmethod
+    def _url(cls, v: str) -> str:
+        received = v
+        v = "".join(v.split())
+        if not is_web_url(v):
+            raise ValueError(f"url must be an absolute http(s) URL (received: {received[:200]!r})")
+        return v

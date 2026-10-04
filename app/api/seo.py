@@ -2,12 +2,14 @@ import json
 from typing import Literal
 from urllib.parse import parse_qs
 
-from fastapi import APIRouter, Depends, Request
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import PlainTextResponse
 from pydantic import ValidationError
 
-from app.models.request import SeoRequest
+from app.config import settings
+from app.models.request import SeoRequest, UrlRequest
 from app.models.response import AuditData, AuditResponse, PageSummary, ParseResponse
 from app.services.html_parser import parse_html
 from app.services.report import render_markdown
@@ -59,6 +61,25 @@ def _audit_data(page) -> AuditData:
 @router.post("/audit", response_model=AuditResponse)
 def audit(req: SeoRequest = Depends(read_seo_request)) -> AuditResponse:
     return AuditResponse(data=_audit_data(parse_html(req.url, req.html)))
+
+
+@router.post("/extract", response_model=AuditResponse)
+def extract(req: UrlRequest) -> AuditResponse:
+    """Fetch a URL server-side and return the full SEO parse + audit. Use this instead
+    of a client-side extractor: just send {"url": "..."}."""
+    try:
+        resp = httpx.get(
+            req.url,
+            timeout=15,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; SeoAuditBot/1.0)"},
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch {req.url}: {exc}")
+    if len(resp.content) > settings.max_html_bytes:
+        raise HTTPException(status_code=502, detail=f"Response from {req.url} exceeds {settings.max_html_bytes} bytes")
+    return AuditResponse(data=_audit_data(parse_html(req.url, resp.text)))
 
 
 @router.post("/report")
