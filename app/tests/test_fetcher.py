@@ -117,3 +117,10 @@ def test_static_extract_rendering_passes(serve):
     body = TestClient(app).post("/api/seo/extract", json={"url": "https://ex.com/"}).json()
     codes = [i["code"] for i in body["data"]["audit"]["issues"]]
     assert "RENDERING_OK" in codes and "CONTENT_REQUIRES_JS" not in codes
+
+
+def test_extract_markdown(serve):
+    serve(STATIC)
+    r = TestClient(app).post("/api/seo/extract?format=markdown", json={"url": "https://ex.com/"})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/markdown")
+    assert "Static page title here" in r.text

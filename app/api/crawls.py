@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Response
 
 from app.models.request import CrawlOptions
 from app.services import store
@@ -24,13 +24,27 @@ def _crawl_or_404(conn, crawl_id: int) -> dict:
 
 
 @router.post("", status_code=202)
-async def start(opts: CrawlOptions, background: BackgroundTasks):
-    """Queue a site crawl. Poll GET /api/seo/crawls/{id} until status is completed or failed."""
+async def start(opts: CrawlOptions, background: BackgroundTasks, response: Response, wait: bool = False):
+    """Queue a site crawl and poll GET /api/seo/crawls/{id}, or pass ?wait=true to block until it
+    finishes and get the summary, issues and architecture in one response (for workflow tools)."""
     conn = store.connect()
     crawl_id = create_crawl(conn, opts)
-    conn.close()
-    background.add_task(run_crawl, crawl_id, opts)
-    return {"success": True, "data": {"crawl_id": crawl_id, "status": "queued"}}
+    if not wait:
+        conn.close()
+        background.add_task(run_crawl, crawl_id, opts)
+        return {"success": True, "data": {"crawl_id": crawl_id, "status": "queued"}}
+    await run_crawl(crawl_id, opts)
+    response.status_code = 200
+    crawl = _crawl_or_404(conn, crawl_id)
+    issues = store.row_dict(conn.execute("SELECT site_issues FROM crawls WHERE id = ?", (crawl_id,)).fetchone())
+    stats = crawl.get("stats") or {}
+    return {"success": crawl["status"] == "completed", "data": {
+        "crawl_id": crawl_id, "status": crawl["status"], "error": crawl["error"], "root_url": crawl["root_url"],
+        "pages_crawled": stats.get("crawled_ok"), "duration_ms": stats.get("duration_ms"),
+        "indexability": stats.get("indexability"), "architecture": stats.get("architecture"),
+        "issues": issues["site_issues"] or [],
+        "top_pages": architecture(crawl_id, limit=10)["data"]["top_authority_pages"],
+    }}
 
 
 @router.get("/{crawl_id}")

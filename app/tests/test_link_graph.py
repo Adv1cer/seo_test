@@ -86,3 +86,22 @@ def test_architecture_endpoint(monkeypatch, tmp_path):
     assert any(p["url"].endswith("/orphan") for p in data["flagged"]["orphan_candidate"])
     links = TestClient(app).get(f"/api/seo/crawls/{cid}/links?internal=true").json()["data"]["links"]
     assert all(l["location"] == "main" for l in links)
+
+
+def test_crawl_wait_returns_results(monkeypatch, tmp_path):
+    from app.config import settings
+    from app.main import app
+    from app.tests.test_crawler import handler
+    from app.services import fetcher
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "w.db"))
+    monkeypatch.setattr(fetcher, "render_html", lambda url, timeout=30: ("<html><body>x</body></html>", 1))
+    real = crawler.run_crawl
+
+    async def fake_run(cid, o):
+        await real(cid, o, transport=httpx.MockTransport(handler))
+    monkeypatch.setattr("app.api.crawls.run_crawl", fake_run)
+    r = TestClient(app).post("/api/seo/crawls?wait=true", json={"url": B + "/", "max_pages": 10})
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["status"] == "completed" and data["pages_crawled"] > 0
+    assert data["issues"] and data["top_pages"][0]["authority"] == 100.0

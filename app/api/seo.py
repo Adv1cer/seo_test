@@ -63,16 +63,20 @@ def audit(req: SeoRequest = Depends(read_seo_request)) -> AuditResponse:
 
 
 @router.post("/extract", response_model=AuditResponse)
-def extract(req: UrlRequest, render: RenderMode = "auto") -> AuditResponse:
+def extract(req: UrlRequest, render: RenderMode = "auto", format: Literal["json", "markdown"] = "json"):
     """Fetch a URL server-side (rendering with a browser only when needed) and return
-    the SEO parse + audit. Send {"url": "..."}; ?render=never|always overrides detection."""
+    the SEO parse + audit. Send {"url": "..."}; ?render=never|always overrides detection;
+    ?format=markdown returns the human-readable report as text."""
     try:
         crawled = crawl_page(req.url, render)
     except FetchError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     if crawled.info.status_code >= 400:
         raise HTTPException(status_code=502, detail=f"{req.url} returned HTTP {crawled.info.status_code}")
-    return AuditResponse(data=_audit_data(crawled.page, crawled.info))
+    data = _audit_data(crawled.page, crawled.info)
+    if format == "markdown":
+        return PlainTextResponse(render_markdown(crawled.page, data.audit), media_type="text/markdown; charset=utf-8")
+    return AuditResponse(data=data)
 
 
 @router.post("/report")
