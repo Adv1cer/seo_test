@@ -206,7 +206,7 @@ def test_language_scope_not_called_whole_website(crawl_ai):
     assert {a["hreflang"] for a in cov["alternate_languages"]} == {"en", "th"}  # th-TH grouped as th
     assert cov["alternate_language_urls_not_crawled"] == 2
     assert B + "/th" in cov["alternate_language_urls_not_crawled_examples"]  # private host mapped to public
-    assert cov["crawled_scope"]["language_segments"] == {"en": 3}
+    assert cov["crawled_scope"]["discovered_language_segments"] == {"en": 3}
     assert cov["requested_scope"]["start_language_segment"] == "en"
     assert "not a percentage of the website" in cov["coverage"]
     assert "This audit covers the /en scope; other language scopes (/th)" in ctx["scope_statement"]

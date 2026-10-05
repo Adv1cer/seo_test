@@ -288,7 +288,7 @@ class _Crawl:
                                 "rules": "same host (www ignored), <a href> links + redirects + sitemap URLs, "
                                          f"max_depth={self.opts.max_depth}, max_pages={limit}, robots.txt "
                                          f"{'respected' if self.opts.respect_robots_txt else 'ignored'}"},
-            "crawled_scope": {"language_segments": langs["crawled_language_segments"]},
+            "crawled_scope": {"discovered_language_segments": langs["crawled_language_segments"]},
             "coverage": f"{pct}% of the {discovered} URLs discovered within the requested scope "
                         "(not a percentage of the website)",
             **{k: v for k, v in langs.items() if k != "crawled_language_segments"},
