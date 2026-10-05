@@ -1,3 +1,6 @@
+import asyncio
+import time
+
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Response
 
 from app.models.request import CrawlOptions
@@ -24,22 +27,66 @@ def _crawl_or_404(conn, crawl_id: int) -> dict:
     return d
 
 
+_RUNNING: set[asyncio.Task] = set()  # strong refs so detached crawls are not garbage-collected
+_FINISHED = ("completed", "failed")
+
+
+def _progress(conn, crawl_id: int) -> dict:
+    """Not-finished response: lets a workflow poll GET /{id}/result until done is true."""
+    crawl = _crawl_or_404(conn, crawl_id)
+    recorded = conn.execute("SELECT COUNT(*) FROM crawl_pages WHERE crawl_id = ?", (crawl_id,)).fetchone()[0]
+    return {"success": True, "data": {
+        "done": False, "crawl_id": crawl_id, "status": crawl["status"], "root_url": crawl["root_url"],
+        "urls_crawled_so_far": recorded, "max_pages": (crawl["options"] or {}).get("max_pages"),
+        "poll_url": f"/api/seo/crawls/{crawl_id}/result"}}
+
+
 @router.post("", status_code=202)
-async def start(opts: CrawlOptions, background: BackgroundTasks, response: Response, wait: bool = False):
-    """Queue a site crawl and poll GET /api/seo/crawls/{id}, or pass ?wait=true to block until it
-    finishes and get the summary, issues and architecture in one response (for workflow tools)."""
+async def start(opts: CrawlOptions, background: BackgroundTasks, response: Response, wait: bool = False,
+                max_wait: float = Query(100, gt=0, le=3600)):
+    """Queue a site crawl. Without ?wait, returns crawl_id immediately. With ?wait=true, waits up to max_wait
+    seconds: if the crawl finishes in time the full result is returned (done=true); otherwise done=false and
+    the crawl keeps running. Poll GET /api/seo/crawls/{id}/result until done is true."""
     conn = store.connect()
     crawl_id = create_crawl(conn, opts)
     if not wait:
         conn.close()
         background.add_task(run_crawl, crawl_id, opts)
-        return {"success": True, "data": {"crawl_id": crawl_id, "status": "queued"}}
-    await run_crawl(crawl_id, opts)
+        return {"success": True, "data": {"done": False, "crawl_id": crawl_id, "status": "queued",
+                                          "poll_url": f"/api/seo/crawls/{crawl_id}/result"}}
+    task = asyncio.create_task(run_crawl(crawl_id, opts))
+    _RUNNING.add(task)
+    task.add_done_callback(_RUNNING.discard)
+    try:
+        await asyncio.wait_for(asyncio.shield(task), max_wait)
+    except asyncio.TimeoutError:
+        return _progress(conn, crawl_id)  # 202: still running
     response.status_code = 200
+    return _result(conn, crawl_id)
+
+
+@router.get("/{crawl_id}/result")
+async def result(crawl_id: int, response: Response, wait: float = Query(0, ge=0, le=3600)):
+    """Poll endpoint for workflows. done=false (HTTP 202) while running; done=true (HTTP 200) with the same
+    full payload as POST ?wait=true once finished. ?wait=N long-polls up to N seconds before answering."""
+    conn = store.connect()
+    deadline = time.monotonic() + wait
+    while True:
+        status = _crawl_or_404(conn, crawl_id)["status"]
+        if status in _FINISHED:
+            return _result(conn, crawl_id)
+        if time.monotonic() >= deadline:
+            response.status_code = 202
+            return _progress(conn, crawl_id)
+        await asyncio.sleep(1)
+
+
+def _result(conn, crawl_id: int) -> dict:
     crawl = _crawl_or_404(conn, crawl_id)
     issues = store.row_dict(conn.execute("SELECT site_issues FROM crawls WHERE id = ?", (crawl_id,)).fetchone())
     stats = crawl.get("stats") or {}
     return {"success": crawl["status"] == "completed", "data": {
+        "done": True,
         "crawl_id": crawl_id, "status": crawl["status"], "error": crawl["error"], "root_url": crawl["root_url"],
         # pages_crawled = successfully fetched HTML pages (was: any fetched HTML response, incl. 404s)
         "pages_crawled": (stats.get("counts") or {}).get("html_pages_ok", stats.get("crawled_ok")),

@@ -185,3 +185,31 @@ def test_wait_response_exposes_scope_and_page_issues(monkeypatch, tmp_path):
     short = next(i for i in d["page_issues"]["issues"] if i["issue"] == "TITLE_TOO_SHORT")
     drill = client.get(f"/api/seo/crawls/{d['crawl_id']}/{short['drilldown']}").json()["data"]
     assert drill["total"] == short["count"] == 2  # every affected URL, not just the examples
+
+
+def test_wait_times_out_then_poll_result(monkeypatch, tmp_path):
+    import asyncio as aio
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "t.db"))
+    real = crawler.run_crawl
+
+    async def slow_run(cid, o):
+        await aio.sleep(1.5)  # longer than max_wait below
+        await real(cid, o, transport=httpx.MockTransport(handler))
+    monkeypatch.setattr("app.api.crawls.run_crawl", slow_run)
+    body = {"url": B + "/", "max_pages": 5, "render_javascript": False}
+    with TestClient(app) as client:  # one event loop for all requests, so the detached crawl keeps running
+        r = client.post("/api/seo/crawls?wait=true&max_wait=0.2", json=body)
+        assert r.status_code == 202
+        d = r.json()["data"]
+        assert d["done"] is False and d["poll_url"] == f"/api/seo/crawls/{d['crawl_id']}/result"
+        r = client.get(d["poll_url"])
+        assert r.status_code == 202 and r.json()["data"]["done"] is False
+        r = client.get(d["poll_url"] + "?wait=30")  # long-poll until finished
+        assert r.status_code == 200
+        done = r.json()["data"]
+        assert done["done"] is True and done["status"] == "completed" and "findings" in done
+        assert client.get("/api/seo/crawls/999/result").status_code == 404
