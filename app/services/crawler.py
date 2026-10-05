@@ -10,7 +10,7 @@ from urllib.parse import urljoin
 import httpx
 
 from app.models.request import CrawlOptions
-from app.services import indexability, store
+from app.services import indexability, link_graph, store
 from app.services.fetcher import USER_AGENT, analyze, to_raw_fetch
 from app.services.seo_auditor import audit_page
 from app.services.sitemap import collect_sitemap_urls, fetch_robots
@@ -139,7 +139,8 @@ class _Crawl:
                 continue
             internal = self.in_domain(link.absolute_url)
             target = crawl_key(link.absolute_url) if internal else link.absolute_url
-            links.append((self.id, key, target, link.text[:500], int(internal), int(link.nofollow)))
+            links.append((self.id, key, target, link.text[:500], int(internal), int(link.nofollow),
+                          link.location))
             if internal:
                 internal_out += 1
                 if follow_links and not link.nofollow:
@@ -147,7 +148,7 @@ class _Crawl:
             else:
                 external_out += 1
         self.conn.executemany("INSERT INTO page_links (crawl_id, source_url, target_url, anchor_text, "
-                              "internal, nofollow) VALUES (?, ?, ?, ?, ?, ?)", links)
+                              "internal, nofollow, location) VALUES (?, ?, ?, ?, ?, ?, ?)", links)
 
         self.record(
             url, key, depth, parent, via, "ok", **common,
@@ -261,10 +262,11 @@ async def run_crawl(crawl_id: int, opts: CrawlOptions, conn=None, transport=None
         status, error = "failed", f"{type(exc).__name__}: {exc}"[:1000]
     stats = crawl.finalize(started)
     store.update(conn, "crawls", crawl_id, {"stats": stats})
-    try:
-        indexability.apply(conn, crawl_id)
-    except Exception:  # analysis failure must not lose the crawl itself
-        log.exception("Indexability analysis failed for crawl %s", crawl_id)
+    for stage in (indexability, link_graph):
+        try:
+            stage.apply(conn, crawl_id)
+        except Exception:  # an analysis failure must not lose the crawl itself
+            log.exception("%s analysis failed for crawl %s", stage.__name__, crawl_id)
     store.update(conn, "crawls", crawl_id, {"status": status, "error": error, "finished_at": store.now()})
     conn.commit()
     log.info("Crawl %s %s: %s ok, %s failed, %s blocked, %sms", crawl_id, status, stats["crawled_ok"],

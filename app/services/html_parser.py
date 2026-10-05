@@ -70,6 +70,23 @@ def _link_text(a) -> str:
     return (_attr(img, "alt") or "") if img else ""
 
 
+_LOCATION_TAGS = {"nav": "nav", "header": "header", "footer": "footer", "aside": "aside", "main": "main",
+                  "article": "main"}
+_LOCATION_ROLES = {"navigation": "nav", "banner": "header", "contentinfo": "footer",
+                   "complementary": "aside", "main": "main"}
+
+
+def _link_location(a) -> str:
+    """Nearest semantic container of a link: nav | header | footer | aside | main | body."""
+    for parent in a.parents:
+        if parent.name in _LOCATION_TAGS:
+            return _LOCATION_TAGS[parent.name]
+        role = (parent.get("role") or "").lower() if hasattr(parent, "get") else ""
+        if role in _LOCATION_ROLES:
+            return _LOCATION_ROLES[role]
+    return "body"
+
+
 def parse_html(url: str, html: str) -> ParsedPage:
     soup = BeautifulSoup(html, "lxml")
     parts = urlsplit(url)
@@ -112,7 +129,8 @@ def parse_html(url: str, html: str) -> ParsedPage:
         target = normalize(absolute) if absolute and ltype in ("internal", "external") else href
         key = (ltype, target, text.casefold())
         links.append(Link(text=text, href=href, absolute_url=absolute, type=ltype,
-                          nofollow="nofollow" in _rel(a), is_duplicate=key in seen))
+                          nofollow="nofollow" in _rel(a), is_duplicate=key in seen,
+                          location=_link_location(a)))
         seen.add(key)
     unique = [link for link in links if not link.is_duplicate]
 

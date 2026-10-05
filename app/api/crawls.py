@@ -10,7 +10,7 @@ _PAGE_LIST_COLS = ("id, url, normalized_url, crawl_status, status_code, content_
                    "discovered_via, in_sitemap, redirect_target, canonical_url, robots_directives, title, "
                    "meta_description, h1, word_count, language, crawl_time_ms, render_required, "
                    "render_status, internal_links_in, internal_links_out, external_links_out, error, "
-                   "json_extract(audit, '$.score') AS audit_score, indexability, crawled_at")
+                   "json_extract(audit, '$.score') AS audit_score, indexability, link_metrics, crawled_at")
 
 
 def _crawl_or_404(conn, crawl_id: int) -> dict:
@@ -69,7 +69,7 @@ def list_links(crawl_id: int, internal: bool | None = None, limit: int = Query(5
         where += " AND internal = ?"
         args.append(int(internal))
     total = conn.execute(f"SELECT COUNT(*) FROM page_links WHERE {where}", args).fetchone()[0]
-    rows = conn.execute(f"SELECT source_url, target_url, anchor_text, internal, nofollow FROM page_links "
+    rows = conn.execute(f"SELECT source_url, target_url, anchor_text, internal, nofollow, location FROM page_links "
                         f"WHERE {where} ORDER BY id LIMIT ? OFFSET ?", [*args, limit, offset]).fetchall()
     return {"success": True, "data": {"total": total, "links": [dict(r) for r in rows]}}
 
@@ -84,3 +84,27 @@ def list_issues(crawl_id: int):
     return {"success": True, "data": {"status": crawl["status"],
                                       "indexability": (crawl["stats"] or {}).get("indexability"),
                                       "issues": issues if issues is not None else []}}
+
+
+_ARCH_FLAGS = ("orphan_candidate", "dead_end", "weak_internal_linking", "deep", "important_but_deep")
+
+
+@router.get("/{crawl_id}/architecture")
+def architecture(crawl_id: int, limit: int = Query(50, ge=1, le=1000)):
+    """Link-graph summary, top pages by internal authority, flagged pages and architecture issues."""
+    conn = store.connect()
+    crawl = _crawl_or_404(conn, crawl_id)
+    rows = [store.row_dict(r) for r in conn.execute(
+        "SELECT url, depth, in_sitemap, link_metrics FROM crawl_pages WHERE crawl_id = ? AND link_metrics IS NOT NULL",
+        (crawl_id,))]
+    pages = [{"url": r["url"], "depth": r["depth"], "in_sitemap": bool(r["in_sitemap"]), **r["link_metrics"]}
+             for r in rows]
+    pages.sort(key=lambda p: -p["authority"])
+    issues = store.row_dict(conn.execute("SELECT site_issues FROM crawls WHERE id = ?", (crawl_id,)).fetchone())
+    return {"success": True, "data": {
+        "status": crawl["status"],
+        "summary": (crawl["stats"] or {}).get("architecture"),
+        "top_authority_pages": pages[:limit],
+        "flagged": {f: [p for p in pages if f in p["flags"]][:limit] for f in _ARCH_FLAGS},
+        "issues": [i for i in issues["site_issues"] or [] if i["category"] == "architecture"],
+    }}

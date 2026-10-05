@@ -14,6 +14,7 @@ class Link(BaseModel):
     type: LinkType
     nofollow: bool
     is_duplicate: bool  # True if an earlier link had the same (type, normalized url, text)
+    location: Literal["nav", "header", "footer", "aside", "main", "body"] = "body"
 
 
 class Image(BaseModel):

@@ -58,6 +58,13 @@ SITE_RULES: dict[str, tuple[str, str, str]] = {
     "SOFT_404_CANDIDATES": ("indexability", "warning", "Pages look like error pages but return 200. Return a real 404/410 status or add real content."),
     "ROBOTS_BLOCKED_PAGES": ("indexability", "info", "Confirm robots.txt blocking is intentional; blocked pages cannot be crawled."),
     "BROKEN_PAGES": ("indexability", "warning", "Fix or remove internal links to pages returning 4xx/5xx or failing to load."),
+    "BROKEN_INTERNAL_LINKS": ("architecture", "critical", "Update or remove internal links pointing to 4xx/5xx or failing URLs."),
+    "REDIRECTED_INTERNAL_LINKS": ("architecture", "warning", "Link directly to the final URL instead of a redirecting one."),
+    "ORPHAN_PAGE_CANDIDATES": ("architecture", "warning", "Link to these pages from relevant hub or navigation pages, or remove them if obsolete."),
+    "DEAD_END_PAGES": ("architecture", "info", "Add contextual links from these pages to related content."),
+    "WEAKLY_LINKED_PAGES": ("architecture", "info", "Add more contextual internal links to these pages from related pages."),
+    "IMPORTANT_PAGES_TOO_DEEP": ("architecture", "warning", "Link these important pages from the homepage or hub pages so they are fewer clicks away."),
+    "DEEP_PAGES": ("architecture", "info", "Reduce click depth with hub pages, breadcrumbs or contextual links."),
     "RENDER_FAILED_PAGES": ("indexability", "warning", "Pages failed to render in a browser; check for JavaScript errors or blocked resources."),
 }
 

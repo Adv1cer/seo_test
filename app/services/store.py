@@ -72,10 +72,12 @@ CREATE INDEX IF NOT EXISTS ix_links_crawl_source ON page_links (crawl_id, source
 MIGRATIONS = [
     ("crawls", "site_issues", "TEXT"),           # JSON list[Issue]: sitemap / indexability findings
     ("crawl_pages", "indexability", "TEXT"),     # JSON per-page states with reasons
+    ("page_links", "location", "TEXT"),          # nav | header | footer | aside | main | body
+    ("crawl_pages", "link_metrics", "TEXT"),     # JSON {authority, unique_inlinks, ..., flags}
 ]
 
 JSON_COLS = {"options", "stats", "robots", "sitemap_urls", "redirect_chain", "robots_directives",
-             "render_info", "audit", "site_issues", "indexability"}
+             "render_info", "audit", "site_issues", "indexability", "link_metrics"}
 
 
 def now() -> str:
