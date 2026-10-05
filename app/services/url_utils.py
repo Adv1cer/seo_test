@@ -1,7 +1,7 @@
 """URL resolution / classification helpers. Pure functions, no network access."""
 import ipaddress
 import re
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 WEB_SCHEMES = ("http", "https")
 
@@ -68,11 +68,13 @@ _PCT = re.compile(r"%([0-9A-Fa-f]{2})")
 
 
 def _decode_unreserved(path: str) -> str:
-    """RFC 3986 §6.2.2: %77%70 == wp. Decode escaped unreserved chars, uppercase the other escapes."""
+    """RFC 3986 §6.2.2: %77%70 == wp. Decode escaped unreserved chars, uppercase the other escapes, and
+    percent-encode raw non-ASCII (IRI -> URI), so /คณะ and /%e0%b8%84%e0%b8%93%e0%b8%b0 are one URL."""
     def sub(m):
         ch = chr(int(m.group(1), 16))
         return ch if ch in _UNRESERVED else "%" + m.group(1).upper()
-    return _PCT.sub(sub, path)
+    path = _PCT.sub(sub, path)
+    return quote(path, safe="/%:@!$&'()*+,;=~") if not path.isascii() else path
 
 
 ASSET_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "webp", "avif", "svg", "ico", "bmp", "tif", "tiff", "heic",

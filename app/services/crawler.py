@@ -21,12 +21,17 @@ from app.services.url_utils import (crawl_key, host_of, is_private_host, is_web_
 log = logging.getLogger("seo.crawler")
 ROBOTS_TOKEN = "SeoAuditBot"
 _MAX_RENDER_ERRORS = 20
+_SITEMAP_URL = re.compile(r"\.(xml|rss)(\.gz)?$", re.I)  # not /sitemap/ HTML pages
 
 
 class _Crawl:
     def __init__(self, crawl_id: int, opts: CrawlOptions, conn, transport=None):
         self.id, self.opts, self.conn, self.transport = crawl_id, opts, conn, transport
         self.root = site_key(host_of(opts.url))
+        # A sitemap given as the start URL is read as a sitemap; link discovery starts at the homepage so
+        # click depth stays meaningful.
+        self.start_is_sitemap = bool(_SITEMAP_URL.search(urlsplit(opts.url).path))
+        self.start_url = urljoin(opts.url, "/") if self.start_is_sitemap else opts.url
         self.include = [re.compile(p) for p in opts.include_patterns]
         self.exclude = [re.compile(p) for p in opts.exclude_patterns]
         self.mode = opts.render_strategy if opts.render_javascript else "never"
@@ -191,8 +196,10 @@ class _Crawl:
             self.robots_status = robots_status
             sitemap_found: list[str] = []
             sitemap_files: list[dict] = []
-            if opts.use_sitemaps:
+            if opts.use_sitemaps or self.start_is_sitemap:
                 sources = robots_sitemaps or [urljoin(opts.url, "/sitemap.xml")]
+                if self.start_is_sitemap:
+                    sources = [opts.url, *sources]
                 sitemap_found, sitemap_files, self.sitemap_meta = await collect_sitemap_urls(
                     client, sources, settings.sitemap_max_urls, settings.sitemap_max_files)
             self.sitemap_keys = {crawl_key(u) for u in sitemap_found if is_web_url(u)}
@@ -201,7 +208,7 @@ class _Crawl:
                 "sitemap_urls": sitemap_found})
             self.conn.commit()
 
-            self.enqueue(opts.url, 0, None, "root")
+            self.enqueue(self.start_url, 0, None, "root")
             for u in sitemap_found:
                 if self.in_domain(u):
                     self.enqueue(u, None, None, "sitemap")
@@ -259,7 +266,7 @@ class _Crawl:
             scope, reason = "crawl_limit_reached", "max_pages_reached"
         else:
             scope, reason = "full_known_scope", None
-        langs = language_scope(self.opts.url, self.root, self.seen, self.alternates)
+        langs = language_scope(self.start_url, self.root, self.seen, self.alternates)
         # The link queue alone cannot prove site size; only a fully read, non-empty sitemap whose URLs were
         # all crawled corroborates it, and never while known language versions were left uncrawled.
         verified = scope == "full_known_scope" and sitemap_ok and not langs["languages_not_crawled"]
@@ -274,9 +281,10 @@ class _Crawl:
         return {
             "audit_scope": scope,
             "coverage_confidence": coverage_confidence,
-            "requested_scope": {"start_url": self.opts.url, "host": self.root,
+            "requested_scope": {"start_url": self.start_url, "requested_url": self.opts.url,
+                                "start_url_was_sitemap": self.start_is_sitemap, "host": self.root,
                                 "scope_type": "host_with_patterns" if self.include or self.exclude else "host",
-                                "start_language_segment": language_segment(self.opts.url),
+                                "start_language_segment": language_segment(self.start_url),
                                 "rules": "same host (www ignored), <a href> links + redirects + sitemap URLs, "
                                          f"max_depth={self.opts.max_depth}, max_pages={limit}, robots.txt "
                                          f"{'respected' if self.opts.respect_robots_txt else 'ignored'}"},

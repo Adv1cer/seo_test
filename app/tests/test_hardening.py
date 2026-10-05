@@ -259,3 +259,73 @@ def test_extensionless_asset_and_page_in_crawl(monkeypatch):
     assert stats["counts"]["html_pages_ok"] == 2 and stats["counts"]["assets_and_non_html_ok"] == 1
     assert stats["page_audit_summary"]["total_pages"] == 2
     assert stats["indexability"]["resource_type"] == {"document": 2, "asset": 1}
+
+
+# --- www.utcc.ac.th regressions ------------------------------------------------------------------------
+from app.services.sitemap import classify_sitemap  # noqa: E402
+from app.services.url_utils import crawl_key  # noqa: E402
+
+
+def test_thai_iri_and_percent_encoded_url_are_one_url():
+    raw = "https://www.utcc.ac.th/คณะนิติศาสตร์-7/"
+    enc = "https://www.utcc.ac.th/%e0%b8%84%e0%b8%93%e0%b8%b0%e0%b8%99%e0%b8%b4%e0%b8%95%e0%b8%b4%e0%b8%a8" \
+          "%e0%b8%b2%e0%b8%aa%e0%b8%95%e0%b8%a3%e0%b9%8c-7/"
+    assert crawl_key(raw) == crawl_key(enc)
+    assert "%E0%B8%84" in crawl_key(raw)  # one canonical encoded form, uppercase escapes
+
+
+def test_rss_and_atom_sitemaps_are_read():
+    rss = ("<?xml version='1.0'?><rss version='2.0'><channel><title>x</title><link>https://x.com/</link>"
+           "<item><link>https://x.com/a</link></item><item><link>https://x.com/b</link></item></channel></rss>")
+    assert classify_sitemap(rss.encode(), "text/xml") == (["https://x.com/a", "https://x.com/b"], [], "ok")
+    atom = ("<feed xmlns='http://www.w3.org/2005/Atom'><entry><link href='https://x.com/c'/></entry>"
+            "<entry><link rel='edit' href='https://x.com/edit'/></entry></feed>")
+    assert classify_sitemap(atom.encode(), "application/atom+xml") == (["https://x.com/c"], [], "ok")
+
+
+def test_tracking_pixels_are_not_content_images():
+    p = parse_html("https://x.com/", "<html><body><noscript><img src='https://tr.line.me/tag.gif'></noscript>"
+                                     "<img src='/px.gif' width='1' height='1'><img src='/flag.png'></body></html>")
+    assert p.images_total == 1 and p.images_without_alt == 1  # only the real (flag) image counts
+
+
+def test_sitemap_as_start_url_crawls_from_homepage(monkeypatch):
+    monkeypatch.setattr(fetcher, "render_html", lambda url, timeout=30: ("<html></html>", 1))
+    home = f"<html lang='en'><head><title>Home page of the example site ok</title></head><body><main>{WORDS}" \
+           "<a href='/about'>About</a></main></body></html>"
+    sm = "<urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'><url><loc>https://x.com/about</loc></url>" \
+         "<url><loc>https://x.com/orphan</loc></url></urlset>"
+
+    def handler(req):
+        if req.url.path == "/sitemap.xml":
+            return httpx.Response(200, text=sm, headers={"content-type": "application/xml"})
+        if req.url.path in ("/", "/about", "/orphan"):
+            return httpx.Response(200, html=home)
+        return httpx.Response(404)
+    conn = store.connect(":memory:")
+    o = CrawlOptions(url="https://x.com/sitemap.xml")
+    cid = crawler.create_crawl(conn, o)
+    asyncio.run(crawler.run_crawl(cid, o, conn, httpx.MockTransport(handler)))
+    stats = store.row_dict(conn.execute("SELECT stats FROM crawls WHERE id=?", (cid,)).fetchone())["stats"]
+    assert stats["crawl"]["requested_scope"]["start_url"] == "https://x.com/"
+    assert stats["crawl"]["requested_scope"]["start_url_was_sitemap"] is True
+    assert stats["depth_distribution"] == {"0": 1, "1": 1, "sitemap_only": 1}
+    assert stats["sitemap"]["read_complete"] is True and stats["counts"]["html_pages_ok"] == 3
+
+
+def test_rss_feed_overlap_is_not_a_sitemap_duplicate():
+    from app.services.sitemap import collect_sitemap_urls
+    ns = "xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'"
+    files = {"/sitemap.xml": f"<urlset {ns}><url><loc>https://x.com/a</loc></url><url><loc>https://x.com/b</loc>"
+                             "</url><url><loc>https://x.com/b</loc></url></urlset>",
+             "/sitemap.rss": "<rss><channel><item><link>https://x.com/a</link></item></channel></rss>"}
+
+    def h(req):
+        return httpx.Response(200, text=files[req.url.path], headers={"content-type": "text/xml"})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(h)) as c:
+            return await collect_sitemap_urls(c, ["https://x.com/sitemap.xml", "https://x.com/sitemap.rss"], 100, 10)
+    urls, _, meta = asyncio.run(go())
+    assert sorted(urls) == ["https://x.com/a", "https://x.com/b"]
+    assert meta["duplicate_examples"] == ["https://x.com/b"]  # XML self-duplicate counted, feed overlap not

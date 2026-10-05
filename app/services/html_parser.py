@@ -94,6 +94,13 @@ def _link_location(a) -> str:
     return "body"
 
 
+def _is_tracking_pixel(img) -> bool:
+    """<noscript> beacons and 1x1 images (analytics/ad pixels) are not content images: no alt needed."""
+    if img.find_parent("noscript") is not None:
+        return True
+    return (_attr(img, "width") or "").strip() in ("0", "1") and (_attr(img, "height") or "").strip() in ("0", "1")
+
+
 def parse_html(url: str, html: str) -> ParsedPage:
     soup = BeautifulSoup(html, "lxml")
     parts = urlsplit(url)
@@ -144,7 +151,7 @@ def parse_html(url: str, html: str) -> ParsedPage:
     images = [
         Image(src=_attr(img, "src") or "", absolute_url=resolve(base_url, _attr(img, "src")),
               alt=_attr(img, "alt"), title=_attr(img, "title") or "", loading=_attr(img, "loading") or "")
-        for img in soup.find_all("img")
+        for img in soup.find_all("img") if not _is_tracking_pixel(img)
     ]
 
     hreflang = [

@@ -1,5 +1,6 @@
 """XML sitemap / sitemap-index parsing and robots.txt discovery. Parsing is pure; fetching is async."""
 import gzip
+import re
 import xml.etree.ElementTree as ET
 from urllib.parse import urljoin
 from urllib.robotparser import RobotFileParser
@@ -29,8 +30,18 @@ def classify_sitemap(xml: bytes, content_type: str = "") -> tuple[list[str], lis
     except ET.ParseError:
         return [], [], "parse_error"
     tag = root.tag.rsplit("}", 1)[-1]
+    local = lambda el: el.tag.rsplit("}", 1)[-1]  # noqa: E731
+    if tag in ("rss", "feed"):  # RSS 2.0 / Atom feeds are accepted sitemap formats
+        if tag == "rss":
+            urls = [el.text.strip() for item in root.iter() if local(item) == "item"
+                    for el in item if local(el) == "link" and el.text and el.text.strip()]
+        else:
+            urls = [el.get("href") for entry in root.iter() if local(entry) == "entry"
+                    for el in entry if local(el) == "link" and el.get("href")
+                    and el.get("rel", "alternate") == "alternate"]
+        return urls, [], "ok" if urls else "empty"
     if tag not in ("urlset", "sitemapindex"):
-        return [], [], "unsupported_format"  # e.g. RSS/Atom feeds: not read, so the inventory has a gap
+        return [], [], "unsupported_format"  # unknown XML: not read, so the inventory has a gap
     locs = [el.text.strip() for el in root.iter() if el.tag.rsplit("}", 1)[-1] == "loc" and el.text]
     result = "ok" if locs else "empty"
     return ([], locs, result) if tag == "sitemapindex" else (locs, [], result)
@@ -74,6 +85,7 @@ async def collect_sitemap_urls(client: httpx.AsyncClient, sitemap_urls: list[str
     queue, seen, files = list(dict.fromkeys(sitemap_urls)), set(), []
     pages: dict[str, str] = {}   # crawl_key -> first URL as listed
     dupes: dict[str, int] = {}
+    xml_keys: set[str] = set()
     stop_reason = None
     while queue:
         url = queue.pop(0)
@@ -94,12 +106,18 @@ async def collect_sitemap_urls(client: httpx.AsyncClient, sitemap_urls: list[str
             found, children, result = classify_sitemap(resp.content, ctype)
         else:
             found, children, result = [], [], f"http_{resp.status_code}"
-        files.append({"url": url, "status": resp.status_code, "content_type": ctype,
-                      "urls": len(found), "children": len(children), "result": result})
+        # RSS/Atom feeds list recent posts that the XML sitemaps also list; that overlap is by design.
+        feed = resp.status_code == 200 and re.search(rb"<(rss|feed)[\s>]", resp.content[:2048]) is not None
+        files.append({"url": url, "status": resp.status_code, "content_type": ctype, "urls": len(found),
+                      "children": len(children), "result": result, "format": "feed" if feed else "xml"})
         for u in found:
             key = crawl_key(u) if is_web_url(u) else u
+            if not feed and key in xml_keys:
+                dupes[key] = dupes.get(key, 1) + 1  # duplicate across/within XML sitemaps only
+            if not feed:
+                xml_keys.add(key)
             if key in pages:
-                dupes[key] = dupes.get(key, 1) + 1
+                continue
             elif len(pages) < max_urls:
                 pages[key] = u
             else:

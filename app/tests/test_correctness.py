@@ -135,7 +135,8 @@ NS = "xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'"
     ("<!doctype html><html><body>app</body></html>", "text/html", "html"),
     ("<html><body>app</body></html>", "application/xml", "html"),
     ("<urlset><url><loc>broken", "application/xml", "parse_error"),
-    ("<rss><channel><item><link>x</link></item></channel></rss>", "application/rss+xml", "unsupported_format"),
+    ("<catalog><book>x</book></catalog>", "application/xml", "unsupported_format"),
+    ("<rss><channel><item><link>https://x.com/a</link></item></channel></rss>", "application/rss+xml", "ok"),
 ])
 def test_classify_sitemap(body, ctype, expected):
     assert classify_sitemap(body.encode(), ctype)[2] == expected
