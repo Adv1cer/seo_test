@@ -151,14 +151,25 @@ def _check_twitter(p: ParsedPage, c: _Collector, s: Settings) -> None:
 
 
 def _check_content(p: ParsedPage, c: _Collector, s: Settings) -> None:
-    n = p.main_content_word_count
-    approx = " (approximate)" if p.word_count_is_approximate else ""
+    """Heuristic only: thresholds are project settings, not search-engine rules. When the main-content
+    extractor has low confidence (its region misses most visible content), judge the boilerplate-stripped
+    content instead, so a small <main> alone never makes a page 'thin'."""
+    low = p.main_content_confidence == "low"
+    n = p.content_word_count if low else p.main_content_word_count
+    basis = "content outside nav/header/footer (main-content extraction confidence low)" if low else "main content"
+    approx = " (approximate: Thai word estimate)" if p.word_count_is_approximate else ""
+    evidence = {"evaluated_words": n, "basis": basis, "main_content_words": p.main_content_word_count,
+                "content_words": p.content_word_count, "body_words": p.word_count,
+                "main_content_method": p.main_content_method, "main_content_confidence": p.main_content_confidence,
+                "language": p.detected_language, "count_method": p.word_count_method}
+    note = " Heuristic threshold, not a search-engine rule."
     if n == 0:
-        c.add("EMPTY_MAIN_CONTENT", "Main content is empty.", 0)
+        c.add("EMPTY_MAIN_CONTENT", f"No text content found in {basis}.", evidence)
     elif n < s.very_thin_words:
-        c.add("VERY_THIN_CONTENT", f"Main content has {n} words{approx} (< {s.very_thin_words}).", n)
+        c.add("VERY_THIN_CONTENT", f"Potential thin content: {basis} has {n} words{approx} (< {s.very_thin_words}).{note}",
+              evidence)
     elif n < s.thin_words:
-        c.add("THIN_CONTENT", f"Main content has {n} words{approx} (< {s.thin_words}).", n)
+        c.add("THIN_CONTENT", f"Potential thin content: {basis} has {n} words{approx} (< {s.thin_words}).{note}", evidence)
 
 
 def _check_structured_data(p: ParsedPage, c: _Collector, s: Settings) -> None:
@@ -184,10 +195,14 @@ def grade_for(score: int) -> str:
 
 
 def _check_rendering(info: CrawlInfo, c: _Collector, s: Settings) -> None:
+    js_only = sorted(f for f, src in info.metadata_source.items() if src == "rendered_dom")
+    if js_only:
+        c.add("METADATA_REQUIRES_JS", f"{len(js_only)} head field(s) only exist after JavaScript rendering: "
+                                      f"{', '.join(js_only)}.", {"fields": js_only, "source": info.metadata_source})
     if info.source == "rendered" and info.raw_word_count < s.render_min_words:
         c.add("CONTENT_REQUIRES_JS",
-              f"Server HTML has {info.raw_word_count} words; content only appears after JavaScript "
-              f"rendering ({info.rendered_word_count} words).",
+              f"Main content is client-rendered: server HTML has {info.raw_word_count} words, rendered HTML has "
+              f"{info.rendered_word_count}. Verify the rendered HTML and consider SSR/SSG for crawlability/performance.",
               {"raw_word_count": info.raw_word_count, "rendered_word_count": info.rendered_word_count})
 
 

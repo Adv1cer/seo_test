@@ -6,7 +6,7 @@ from app.config import settings
 from app.models.response import Issue
 from app.rules.seo_rules import SEVERITY_ORDER, SITE_RULES
 from app.services import store
-from app.services.url_utils import crawl_key
+from app.services.url_utils import crawl_key, resource_type
 
 _EXAMPLES = 20
 DAMPING = 0.85
@@ -65,7 +65,9 @@ def analyze(rows: list[dict], links: list[dict]) -> tuple[dict[str, dict], list[
         if target_row is not None:
             if target_row["crawl_status"] == "error" or (target_row["status_code"] or 0) >= 400:
                 broken.append({"source": by_key[src]["url"], "target": target_row["url"], "anchor": l["anchor_text"],
-                               "status": target_row["status_code"] or target_row["crawl_status"]})
+                               "status": target_row["status_code"] or target_row["crawl_status"],
+                               "resource_type": resource_type(target_row["url"], target_row.get("content_type"),
+                                                              target_row["status_code"])})
             elif target_row["crawl_status"] == "redirect":
                 redirected.append({"source": by_key[src]["url"], "target": target_row["url"],
                                    "redirects_to": target_row["redirect_target"], "anchor": l["anchor_text"]})
@@ -113,11 +115,14 @@ def analyze(rows: list[dict], links: list[dict]) -> tuple[dict[str, dict], list[
         return [u for u, _ in hits]
 
     issues: list[Issue] = []
-    if broken:
-        issues.append(_issue("BROKEN_INTERNAL_LINKS",
-                             f"{len(broken)} internal link(s) point to error pages "
-                             f"({len({b['target'] for b in broken})} distinct target(s)).",
-                             broken[:_EXAMPLES], len(broken)))
+    broken_assets = [b for b in broken if b["resource_type"] != "document"]
+    broken = [b for b in broken if b["resource_type"] == "document"]
+    for code, items, kind in (("BROKEN_INTERNAL_LINKS", broken, "pages"),
+                              ("BROKEN_RESOURCE_LINKS", broken_assets, "image/file URLs")):
+        if items:
+            issues.append(_issue(code, f"{len(items)} internal link(s) point to {kind} returning errors "
+                                       f"({len({b['target'] for b in items})} distinct target(s)).",
+                                 items[:_EXAMPLES], len(items)))
     if redirected:
         issues.append(_issue("REDIRECTED_INTERNAL_LINKS", f"{len(redirected)} internal link(s) go through redirects.",
                              redirected[:_EXAMPLES], len(redirected)))
@@ -141,6 +146,7 @@ def analyze(rows: list[dict], links: list[dict]) -> tuple[dict[str, dict], list[
         "depth_distribution": {str(k): v for k, v in sorted(depth.items(), key=lambda x: (isinstance(x[0], str), x[0]))},
         "link_locations": dict(anchor_locations),
         "broken_internal_links": len(broken),
+        "broken_resource_links": len(broken_assets),
         "redirected_internal_links": len(redirected),
         **{f"{flag}_count": len(flagged(flag)) for flag in
            ("orphan_candidate", "dead_end", "weak_internal_linking", "deep", "important_but_deep")},

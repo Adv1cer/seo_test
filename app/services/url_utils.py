@@ -1,5 +1,6 @@
 """URL resolution / classification helpers. Pure functions, no network access."""
 import ipaddress
+import re
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 WEB_SCHEMES = ("http", "https")
@@ -62,6 +63,61 @@ def is_web_url(url: str | None) -> bool:
     return bool(parts and parts.scheme.lower() in WEB_SCHEMES and parts.hostname)
 
 
+_UNRESERVED = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+_PCT = re.compile(r"%([0-9A-Fa-f]{2})")
+
+
+def _decode_unreserved(path: str) -> str:
+    """RFC 3986 §6.2.2: %77%70 == wp. Decode escaped unreserved chars, uppercase the other escapes."""
+    def sub(m):
+        ch = chr(int(m.group(1), 16))
+        return ch if ch in _UNRESERVED else "%" + m.group(1).upper()
+    return _PCT.sub(sub, path)
+
+
+ASSET_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "webp", "avif", "svg", "ico", "bmp", "tif", "tiff", "heic",
+                    "pdf", "zip", "rar", "7z", "gz", "mp3", "mp4", "m4a", "wav", "webm", "mov", "avi",
+                    "css", "js", "json", "xml", "txt", "csv", "woff", "woff2", "ttf", "otf", "eot",
+                    "doc", "docx", "xls", "xlsx", "ppt", "pptx"}
+
+
+_ASSET_TYPES = ("image/", "font/", "video/", "audio/", "text/css", "javascript", "application/font",
+                "application/vnd.ms-fontobject")
+
+
+def resource_type(url: str | None, content_type: str | None, status_code: int | None) -> str:
+    """document | asset | non_html. Content-Type is authoritative for successful responses (< 400): text/html
+    is a document even at /photo.jpg, image/* at /img/123 is an asset. Error responses usually carry the
+    server's HTML error page, whose Content-Type says nothing about the requested resource, so they (and
+    responses without Content-Type) fall back to the URL extension."""
+    ct = (content_type or "").split(";")[0].strip().lower()
+    if ct and (status_code or 0) < 400:
+        if "html" in ct:
+            return "document"
+        if ct.startswith(_ASSET_TYPES):
+            return "asset"
+        return "non_html"  # application/pdf, application/zip, json, xml, plain text...
+    return "asset" if is_asset_url(url) else "document"
+
+
+def is_asset_url(url: str | None) -> bool:
+    """True when the URL path names a file/media resource (image, PDF, script...) rather than a page.
+    Judged by extension only, so it also holds for assets that 404 with an HTML error page."""
+    parts = safe_split(url or "")
+    last = (parts.path if parts else "").rsplit("/", 1)[-1]
+    return "." in last and _decode_unreserved(last).rsplit(".", 1)[-1].lower() in ASSET_EXTENSIONS
+
+
+_LANG_SEGMENT = re.compile(r"^/([a-z]{2}(?:[-_][a-z]{2})?)(?:/|$)", re.I)
+
+
+def language_segment(url: str | None) -> str | None:
+    """'en' for https://x/en/news, 'th-th' for /th-TH/; None when the first path segment is not a language."""
+    parts = safe_split(url or "")
+    m = _LANG_SEGMENT.match(parts.path if parts else "")
+    return m.group(1).lower().replace("_", "-") if m else None
+
+
 def normalize(url: str) -> str:
     """Canonical form for de-duplication: lowercase scheme/host, drop default port,
     drop fragment, strip trailing slash (except root). Query string is kept."""
@@ -73,7 +129,7 @@ def normalize(url: str) -> str:
     port = parts.port
     if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
         host = f"{host}:{port}"
-    path = parts.path or "/"
+    path = _decode_unreserved(parts.path or "/")
     if len(path) > 1:
         path = path.rstrip("/")
     return urlunsplit((scheme, host, path, parts.query, ""))

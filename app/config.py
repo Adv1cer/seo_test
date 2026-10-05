@@ -18,6 +18,9 @@ class Settings:
     render_min_words: int = _int("SEO_RENDER_MIN_WORDS", 50)
     deep_page_depth: int = _int("SEO_DEEP_PAGE_DEPTH", 4)
     render_concurrency: int = _int("SEO_RENDER_CONCURRENCY", 2)
+    # Sitemap safety limits (anti sitemap-bomb). Separate from, and much larger than, crawl max_pages.
+    sitemap_max_urls: int = _int("SEO_SITEMAP_MAX_URLS", 200_000)
+    sitemap_max_files: int = _int("SEO_SITEMAP_MAX_FILES", 1_000)
     db_path: str = os.environ.get("SEO_DB_PATH", "data/seo.db")
 
 

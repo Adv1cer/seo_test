@@ -59,15 +59,22 @@ def _jsonld_types(data, out: list[str]) -> None:
             _jsonld_types(data["@graph"], out)
 
 
-def _link_text(a) -> str:
+def _link_text(a, soup=None) -> str:
+    """Accessible name: aria-labelledby (if resolvable) > aria-label > descendant text > any descendant
+    <img alt> > title. <img alt=""> (decorative) gives no name, so an image-only link stays empty."""
+    ids = (_attr(a, "aria-labelledby") or "").split()
+    if ids and soup is not None:
+        named = cc.normalize_ws(" ".join(cc.text_of(soup.find(id=i)) for i in ids))
+        if named:
+            return named
+    label = _attr(a, "aria-label")
+    if label:
+        return label
     text = cc.text_of(a)
     if text:
         return text
-    for cand in (_attr(a, "aria-label"), _attr(a, "title")):
-        if cand:
-            return cand
-    img = a.find("img", alt=True)
-    return (_attr(img, "alt") or "") if img else ""
+    alt = next((_attr(img, "alt") for img in a.find_all("img") if _attr(img, "alt")), None)
+    return alt or _attr(a, "title") or ""
 
 
 _LOCATION_TAGS = {"nav": "nav", "header": "header", "footer": "footer", "aside": "aside", "main": "main",
@@ -125,7 +132,7 @@ def parse_html(url: str, html: str) -> ParsedPage:
     for a in soup.find_all("a", href=True):
         href = _attr(a, "href") or ""
         ltype, absolute = classify_link(base_url, href)
-        text = _link_text(a)
+        text = _link_text(a, soup)
         target = normalize(absolute) if absolute and ltype in ("internal", "external") else href
         key = (ltype, target, text.casefold())
         links.append(Link(text=text, href=href, absolute_url=absolute, type=ltype,
@@ -164,7 +171,19 @@ def parse_html(url: str, html: str) -> ParsedPage:
     # Content extraction mutates the soup, so it runs last.
     cc.strip_noise(soup)
     body_text = cc.text_of(soup.body or soup)
-    main_content = cc.text_of(cc.main_content_node(soup))
+    extracted = cc.extract_content(soup)
+    main_content = extracted["main_text"]
+    lang, lang_signal = cc.detect_language(language, parts.path, body_text)
+    method, approximate = cc.word_count_method(lang, main_content or body_text)
+    main_words, content_words = cc.count_words(main_content), cc.count_words(extracted["content_text"])
+    ratio = round(main_words / content_words, 2) if content_words else 1.0
+    semantic = extracted["method"] != "body_without_boilerplate"
+    if content_words == 0:
+        confidence = "high"   # genuinely empty page
+    elif main_words == 0 or (semantic and ratio < 0.5):
+        confidence = "low"    # the semantic region misses most of the visible content
+    else:
+        confidence = "high"
 
     return ParsedPage(
         url=url,
@@ -216,6 +235,13 @@ def parse_html(url: str, html: str) -> ParsedPage:
         body_text=body_text,
         main_content=main_content,
         word_count=cc.count_words(body_text),
-        main_content_word_count=cc.count_words(main_content),
-        word_count_is_approximate=cc.contains_thai(body_text),
+        main_content_word_count=main_words,
+        word_count_is_approximate=approximate,
+        detected_language=lang,
+        language_signal=lang_signal,
+        word_count_method=method,
+        content_word_count=content_words,
+        main_content_method=extracted["method"],
+        main_content_ratio=ratio,
+        main_content_confidence=confidence,
     )

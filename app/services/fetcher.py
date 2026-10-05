@@ -144,6 +144,14 @@ def analyze(raw_fetch: RawFetch, mode: RenderMode = "auto") -> CrawledPage:
         or len(rendered.heading_order) > len(raw.heading_order)
         or rendered.links_total > raw.links_total + 5
     )
+    sources = metadata_sources(raw, rendered)
+    page = rendered if use_rendered else raw
+    if rendered is not None and not use_rendered:
+        # Body content came from raw HTML, but head tags injected by JS (react-helmet etc.) are still in the
+        # final DOM: take them from the rendered page so they are not reported as missing.
+        update = {attr: getattr(rendered, attr) for field, src in sources.items() if src == "rendered_dom"
+                  for attr in _HEAD_FIELDS[field]}
+        page = raw.model_copy(update=update)
     info = CrawlInfo(
         status_code=raw_fetch.status_code,
         final_url=raw_fetch.final_url,
@@ -159,5 +167,30 @@ def analyze(raw_fetch: RawFetch, mode: RenderMode = "auto") -> CrawledPage:
         source="rendered" if use_rendered else "raw",
         raw_word_count=raw.word_count,
         rendered_word_count=rendered.word_count if rendered else None,
+        metadata_source=sources,
     )
-    return CrawledPage(page=rendered if use_rendered else raw, raw=raw, rendered=rendered, info=info)
+    return CrawledPage(page=page, raw=raw, rendered=rendered, info=info)
+
+
+# Head field -> ParsedPage attributes carried with it.
+_HEAD_FIELDS = {
+    "title": ("title", "title_length"),
+    "meta_description": ("meta_description", "meta_description_length"),
+    "canonical": ("canonical", "canonical_absolute_url"),
+    "hreflang": ("hreflang",),
+    "og_title": ("og_title",), "og_description": ("og_description",), "og_image": ("og_image",),
+    "twitter_card": ("twitter_card",),
+}
+
+
+def metadata_sources(raw: ParsedPage, rendered: ParsedPage | None) -> dict[str, str]:
+    """server_html: present in raw HTML | rendered_dom: only after JS | missing: in neither (or not rendered)."""
+    out = {}
+    for field in _HEAD_FIELDS:
+        if getattr(raw, field):
+            out[field] = "server_html"
+        elif rendered is not None and getattr(rendered, field):
+            out[field] = "rendered_dom"
+        else:
+            out[field] = "missing"
+    return out

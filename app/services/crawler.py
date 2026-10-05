@@ -5,16 +5,18 @@ import logging
 import re
 import time
 from collections import Counter, deque
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
+from app.config import settings
 from app.models.request import CrawlOptions
-from app.services import indexability, link_graph, store
+from app.services import indexability, link_graph, page_audit_summary, store
 from app.services.fetcher import USER_AGENT, analyze, to_raw_fetch
 from app.services.seo_auditor import audit_page
 from app.services.sitemap import collect_sitemap_urls, fetch_robots
-from app.services.url_utils import crawl_key, host_of, is_web_url, site_key
+from app.services.url_utils import (crawl_key, host_of, is_private_host, is_web_url,
+                                    language_segment, resource_type, site_key)
 
 log = logging.getLogger("seo.crawler")
 ROBOTS_TOKEN = "SeoAuditBot"
@@ -30,6 +32,8 @@ class _Crawl:
         self.mode = opts.render_strategy if opts.render_javascript else "never"
         self.seen: set[str] = set()          # crawl keys queued or recorded
         self.sitemap_keys: set[str] = set()
+        self.link_keys: set[str] = set()      # discovered via the start URL, links or redirects
+        self.alternates: dict[str, set[str]] = {}  # hreflang lang -> alternate URLs seen on crawled pages
         self.link_q: deque = deque()         # (url, depth, parent_url, via)
         self.sitemap_q: deque = deque()
         self.fetched = 0
@@ -38,6 +42,7 @@ class _Crawl:
         self.timing = Counter()
         self.depths = Counter()
         self.render_errors: list[dict] = []
+        self.sitemap_meta: dict | None = None  # None = sitemaps not used
 
     # --- scope -------------------------------------------------------------
     def in_domain(self, url: str) -> bool:
@@ -61,6 +66,8 @@ class _Crawl:
         if depth is not None and depth > self.opts.max_depth:
             self.stats["skipped_depth"] += 1
             return
+        if via != "sitemap":
+            self.link_keys.add(key)
         if via == "sitemap":  # not marked seen yet, so a later link discovery still sets real depth
             self.sitemap_q.append((url, depth, parent, via))
             return
@@ -75,7 +82,8 @@ class _Crawl:
         store.insert(self.conn, "crawl_pages", row)
         self.conn.commit()
         self.stats[f"status_{crawl_status}"] += 1
-        if crawl_status == "ok":
+        kind = resource_type(url, fields.get("content_type"), fields.get("status_code"))
+        if crawl_status == "ok" and (fields.get("status_code") or 0) < 400 and kind == "document":
             self.depths["sitemap_only" if depth is None else str(depth)] += 1
 
     # --- work --------------------------------------------------------------
@@ -111,6 +119,7 @@ class _Crawl:
                 if final_key in self.seen or not self.in_domain(raw.final_url):
                     return  # target already crawled/queued, or off-site: the redirect row is enough
                 self.seen.add(final_key)
+                self.link_keys.add(final_key)
                 url, key, parent = raw.final_url, final_key, url
 
         content_type = raw.content_type
@@ -122,6 +131,11 @@ class _Crawl:
 
         crawled = await asyncio.to_thread(analyze, raw, self.mode)
         info, page = crawled.info, crawled.page
+        if raw.status_code < 400:
+            for h in page.hreflang:
+                if h.absolute_url:  # group by base language: th-TH and th are the same /th version
+                    lang = h.lang.lower() if h.lang.lower() == "x-default" else h.lang.lower().split("-")[0]
+                    self.alternates.setdefault(lang, set()).add(h.absolute_url)
         if info.render_duration_ms:
             self.timing["render_ms"] += info.render_duration_ms
         if info.render_status == "rendered":
@@ -174,11 +188,13 @@ class _Crawl:
         async with httpx.AsyncClient(timeout=opts.request_timeout, follow_redirects=opts.follow_redirects,
                                      headers={"User-Agent": USER_AGENT}, transport=self.transport) as client:
             self.robots, robots_sitemaps, robots_status = await fetch_robots(client, opts.url)
+            self.robots_status = robots_status
             sitemap_found: list[str] = []
             sitemap_files: list[dict] = []
             if opts.use_sitemaps:
                 sources = robots_sitemaps or [urljoin(opts.url, "/sitemap.xml")]
-                sitemap_found, sitemap_files = await collect_sitemap_urls(client, sources, opts.max_pages * 5)
+                sitemap_found, sitemap_files, self.sitemap_meta = await collect_sitemap_urls(
+                    client, sources, settings.sitemap_max_urls, settings.sitemap_max_files)
             self.sitemap_keys = {crawl_key(u) for u in sitemap_found if is_web_url(u)}
             store.update(self.conn, "crawls", self.id, {
                 "robots": {"status": robots_status, "sitemaps": robots_sitemaps},
@@ -219,7 +235,75 @@ class _Crawl:
             self.timing["sitemap_files"] = len(sitemap_files)
             self._sitemap_files = sitemap_files
 
-    def finalize(self, started: float) -> dict:
+    def coverage(self, failed: bool) -> dict:
+        """Discovered vs crawled. Discovered = every in-scope URL found via links, redirects or sitemaps
+        (excluding include/exclude pattern skips). complete only when nothing discovered was left over."""
+        pending_sitemap = {crawl_key(u) for u, *_ in self.sitemap_q} - self.seen
+        discovered = len(self.seen) + len(pending_sitemap)
+        remaining = len(self.link_q) + len(pending_sitemap)
+        sm = self.sitemap_meta or {}
+        sitemap_status = sm.get("status") or ("not_used" if self.sitemap_meta is None else None)
+        limit = self.opts.max_pages
+        limit_reached = self.fetched >= limit
+        sitemap_ok = sitemap_status == "ok"
+        if failed:
+            scope, reason = "partial", "crawl_error"
+        elif remaining:
+            scope, reason = "partial", "max_pages_reached"
+        elif self.stats["skipped_depth"]:
+            scope, reason = "partial", "max_depth_reached"
+        elif sitemap_status == "partial":
+            scope, reason = "partial", "sitemap_incomplete"  # unread sitemap URLs may never have been discovered
+        elif limit_reached:
+            # Queue happened to empty exactly at the limit: no evidence that nothing else exists.
+            scope, reason = "crawl_limit_reached", "max_pages_reached"
+        else:
+            scope, reason = "full_known_scope", None
+        langs = language_scope(self.opts.url, self.root, self.seen, self.alternates)
+        # The link queue alone cannot prove site size; only a fully read, non-empty sitemap whose URLs were
+        # all crawled corroborates it, and never while known language versions were left uncrawled.
+        verified = scope == "full_known_scope" and sitemap_ok and not langs["languages_not_crawled"]
+        confidence = "high" if verified else "medium" if scope == "full_known_scope" else "low"
+        if scope != "full_known_scope":
+            coverage_confidence = scope
+        elif langs["languages_not_crawled"]:
+            coverage_confidence = "scoped_complete_other_languages_not_crawled"
+        else:
+            coverage_confidence = "sitemap_verified_complete" if verified else "scoped_complete"
+        pct = round(100 * (discovered - remaining) / discovered, 2) if discovered else 0.0
+        return {
+            "audit_scope": scope,
+            "coverage_confidence": coverage_confidence,
+            "requested_scope": {"start_url": self.opts.url, "host": self.root,
+                                "scope_type": "host_with_patterns" if self.include or self.exclude else "host",
+                                "start_language_segment": language_segment(self.opts.url),
+                                "rules": "same host (www ignored), <a href> links + redirects + sitemap URLs, "
+                                         f"max_depth={self.opts.max_depth}, max_pages={limit}, robots.txt "
+                                         f"{'respected' if self.opts.respect_robots_txt else 'ignored'}"},
+            "crawled_scope": {"language_segments": langs["crawled_language_segments"]},
+            "coverage": f"{pct}% of the {discovered} URLs discovered within the requested scope "
+                        "(not a percentage of the website)",
+            **{k: v for k, v in langs.items() if k != "crawled_language_segments"},
+            "requested_limit": limit,
+            "max_depth": self.opts.max_depth,
+            "sitemap_status": sitemap_status,
+            "sitemap_urls": len(self.sitemap_keys) if sitemap_ok or sitemap_status == "partial" else None,
+            "sitemap_urls_exceed_limit": len(self.sitemap_keys) > limit,
+            "link_discovered_urls": len(self.link_keys),
+            "discovered_urls": discovered,
+            "crawled_urls": self.fetched,
+            "queue_remaining": remaining,
+            "not_crawled_urls": remaining,  # alias kept for compatibility
+            "skipped_max_depth": self.stats["skipped_depth"],
+            "max_depth_reached": max((int(d) for d in self.depths if d != "sitemap_only"), default=0),
+            "coverage_percent": round(100 * (discovered - remaining) / discovered, 2) if discovered else 0.0,
+            "complete": scope == "full_known_scope",
+            "site_coverage_verified": verified,
+            "confidence": confidence,
+            "stop_reason": reason,
+        }
+
+    def finalize(self, started: float, failed: bool = False) -> dict:
         self.conn.execute(
             "UPDATE crawl_pages SET internal_links_in = (SELECT COUNT(*) FROM page_links l WHERE "
             "l.crawl_id = crawl_pages.crawl_id AND l.internal = 1 AND l.target_url = crawl_pages.normalized_url "
@@ -244,7 +328,41 @@ class _Crawl:
             "depth_distribution": dict(sorted(self.depths.items())),
             "sitemap_urls": len(self.sitemap_keys),
             "sitemap_files": getattr(self, "_sitemap_files", []),
+            "sitemap": self.sitemap_meta,
+            "robots_status": getattr(self, "robots_status", None),
+            "crawl": self.coverage(failed),
         }
+
+
+def language_scope(start_url: str, root: str, seen: set[str], alternates: dict[str, set[str]]) -> dict:
+    """Which language versions were crawled vs only declared via hreflang. A private-host hreflang URL is
+    mapped to the same path on the crawled public host to check whether that version was crawled."""
+    segs = Counter(language_segment(k) or "(none)" for k in seen)
+    scheme = start_url.split("://", 1)[0]
+    out, all_urls, not_crawled = [], set(), set()
+    for lang, urls in sorted(alternates.items()):
+        rows = []
+        for u in sorted(urls):
+            public = u
+            if is_private_host(host_of(u)):
+                parts = urlsplit(u)
+                public = urlunsplit((scheme, host_of(start_url), parts.path, parts.query, ""))
+            crawled = crawl_key(u) in seen or crawl_key(public) in seen
+            all_urls.add(public)
+            if not crawled:
+                not_crawled.add(public)
+            rows.append(crawled)
+        prefixes = sorted({f"/{language_segment(u)}" for u in urls if language_segment(u)})
+        out.append({"hreflang": lang, "url_prefixes": prefixes, "urls": len(urls), "crawled": sum(rows),
+                    "examples": sorted(urls)[:3],
+                    "private_host": any(is_private_host(host_of(u)) for u in urls)})
+    # Name uncrawled versions by URL prefix (/th) when hreflang URLs have one, else by language code.
+    missing = sorted({p for a in out if a["crawled"] == 0 and a["hreflang"] != "x-default"
+                      for p in (a["url_prefixes"] or [a["hreflang"]])})
+    return {"crawled_language_segments": dict(segs), "alternate_languages": out,
+            "alternate_language_urls": len(all_urls), "alternate_language_urls_not_crawled": len(not_crawled),
+            "alternate_language_urls_not_crawled_examples": sorted(not_crawled)[:10],
+            "languages_not_crawled": missing}
 
 
 async def run_crawl(crawl_id: int, opts: CrawlOptions, conn=None, transport=None) -> None:
@@ -260,9 +378,9 @@ async def run_crawl(crawl_id: int, opts: CrawlOptions, conn=None, transport=None
     except Exception as exc:
         log.exception("Crawl %s failed", crawl_id)
         status, error = "failed", f"{type(exc).__name__}: {exc}"[:1000]
-    stats = crawl.finalize(started)
+    stats = crawl.finalize(started, failed=status == "failed")
     store.update(conn, "crawls", crawl_id, {"stats": stats})
-    for stage in (indexability, link_graph):
+    for stage in (indexability, link_graph, page_audit_summary):
         try:
             stage.apply(conn, crawl_id)
         except Exception:  # an analysis failure must not lose the crawl itself

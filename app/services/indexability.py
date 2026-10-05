@@ -6,15 +6,15 @@ from collections import Counter
 from app.models.response import Issue
 from app.rules.seo_rules import SEVERITY_ORDER, SITE_RULES
 from app.services import store
-from app.services.url_utils import crawl_key, host_of, is_private_host, is_web_url
+from app.services.url_utils import crawl_key, host_of, is_private_host, is_web_url, resource_type
 
 STATES = ("discovered", "crawlable", "fetchable", "renderable", "indexable", "canonical")
 _SOFT_404 = re.compile(r"\b(404|not found|page not found|page doesn.t exist)\b|ไม่พบ(หน้า)?", re.I)
 _EXAMPLES = 20
 
 
-def _state(value: bool | None, reason: str) -> dict:
-    return {"value": value, "reason": reason}
+def _state(value: bool | None, reason: str, status: str | None = None) -> dict:
+    return {"value": value, "reason": reason} | ({"status": status} if status else {})
 
 
 def _noindex(directives: str | None) -> bool:
@@ -46,6 +46,15 @@ def page_states(row: dict, pages_by_key: dict[str, dict]) -> dict:
     else:
         s["fetchable"] = _state(True, f"HTTP {code}")
 
+    kind = resource_type(row["url"], row["content_type"], code)
+    if kind != "document":  # image/font/PDF/...: a resource, not a page; only fetchability applies
+        for k in ("renderable", "indexable", "canonical"):
+            s[k] = _state(None, f"non-page resource ({kind}, content-type {row['content_type'] or 'unknown'})")
+        s["canonical"]["status"] = "not_applicable"
+        s["resource"] = kind
+        return s
+    s["resource"] = "document"
+
     render = row["render_status"]
     if status != "ok":
         s["renderable"] = _state(None, "not analyzed")
@@ -70,23 +79,27 @@ def page_states(row: dict, pages_by_key: dict[str, dict]) -> dict:
     else:
         s["indexable"] = _state(True, "HTTP 200, no robots exclusion")
 
+    # canonical.value answers ONE question: "is this page its own valid canonical?" It says nothing about
+    # whether the page itself is indexable (that is the indexable state). canonical.status says why.
     canonical = row["canonical_url"]
-    if status != "ok":
-        s["canonical"] = _state(None, "not analyzed")
+    if status != "ok" or (code or 0) >= 400:
+        s["canonical"] = _state(None, "not analyzed (page not successfully fetched)", "not_analyzed")
     elif not canonical:
-        s["canonical"] = _state(True, "no canonical tag (self-canonical by default)")
+        s["canonical"] = _state(True, "no canonical tag (self-canonical by default)", "missing_implicit_self")
     elif not is_web_url(canonical):
-        s["canonical"] = _state(False, f"canonical is not a valid http(s) URL: {canonical}")
+        s["canonical"] = _state(False, f"canonical is not a valid http(s) URL: {canonical}", "invalid")
     elif crawl_key(canonical) == row["normalized_url"]:
-        s["canonical"] = _state(True, "self-referencing canonical")
+        s["canonical"] = _state(True, "self-referencing canonical", "self")
     elif is_private_host(host_of(canonical)):
-        s["canonical"] = _state(False, f"canonical points to private/internal host: {canonical}")
+        s["canonical"] = _state(False, f"canonical points to private/internal host: {canonical}", "private_host")
     else:
         target = pages_by_key.get(crawl_key(canonical))
         reason = f"canonical points to another URL: {canonical}"
         if target is not None and (target["crawl_status"] != "ok" or (target["status_code"] or 0) >= 400):
             reason += f" (target is {target['crawl_status']}, HTTP {target['status_code']})"
-        s["canonical"] = _state(False, reason)
+            s["canonical"] = _state(False, reason, "target_not_indexable")
+        else:
+            s["canonical"] = _state(False, reason, "other_url")
 
     title_h1 = f"{row['title'] or ''} {row['h1'] or ''}"
     s["soft_404_candidate"] = bool(status == "ok" and code == 200 and _SOFT_404.search(title_h1))
@@ -107,21 +120,39 @@ def site_issues(crawl: dict, rows: list[dict], states: dict[str, dict]) -> list[
     sitemap_urls = crawl.get("sitemap_urls") or []
     options = crawl.get("options") or {}
 
+    if robots.get("status") == "html_response":
+        issues.append(_issue("ROBOTS_TXT_INVALID", "/robots.txt returns an HTML page instead of a plain-text "
+                             "robots.txt, so it was treated as absent (no rules, no Sitemap: directive)."))
+
     if options.get("use_sitemaps", True):
-        ok_files = [f for f in files if f.get("status") == 200]
-        if not ok_files:
-            issues.append(_issue("SITEMAP_NOT_FOUND", "No reachable XML sitemap found.",
-                                 value=[{"url": f["url"], "status": f.get("status")} for f in files]))
-        elif not sitemap_urls and not any(f.get("children") for f in ok_files):
+        meta = stats.get("sitemap") or {}
+        status = meta.get("status")
+        file_info = [{"url": f["url"], "status": f.get("status"), "content_type": f.get("content_type"),
+                      "result": f.get("result")} for f in files]
+        empty_messages = {
+            "html_instead_of_xml": "Sitemap URL returns an HTML page instead of an XML sitemap.",
+            "parse_error": "Sitemap could not be parsed as XML.",
+            "unsupported_format": "Sitemap is XML but not a <urlset>/<sitemapindex> (e.g. an RSS feed).",
+            "empty": "Sitemap is valid XML but contains 0 <loc> URLs.",
+        }
+        if status in ("not_found", "fetch_error") or (status is None and not any(f.get("status") == 200 for f in files)):
+            issues.append(_issue("SITEMAP_NOT_FOUND", "No reachable XML sitemap found.", value=file_info))
+        elif status in empty_messages:
+            issues.append(_issue("SITEMAP_EMPTY_OR_INVALID", empty_messages[status], value=file_info))
+        elif status is None and not sitemap_urls and not any(f.get("children") for f in files):
             issues.append(_issue("SITEMAP_EMPTY_OR_INVALID",
-                                 "Sitemap responds with HTTP 200 but contains no <loc> URLs.",
-                                 value=[{"url": f["url"], "content_type": f.get("content_type")} for f in ok_files]))
+                                 "Sitemap responds with HTTP 200 but contains no <loc> URLs.", value=file_info))
         if robots.get("status") == "ok" and not robots.get("sitemaps"):
             issues.append(_issue("SITEMAP_NOT_IN_ROBOTS", "robots.txt has no Sitemap: directive."))
 
-        dupes = [u for u, n in Counter(crawl_key(u) for u in sitemap_urls).items() if n > 1]
+        # sitemap_urls is deduplicated at read time; duplicates are reported in the sitemap meta.
+        # Crawls without meta (older rows) fall back to counting the raw list.
+        dupes = meta.get("duplicate_examples") if meta else \
+            [u for u, n in Counter(crawl_key(u) for u in sitemap_urls).items() if n > 1]
         if dupes:
-            issues.append(_issue("SITEMAP_DUPLICATE_URLS", f"{len(dupes)} URL(s) listed more than once in sitemaps.", dupes))
+            n_dupes = meta.get("duplicate_urls", len(dupes))
+            issues.append(_issue("SITEMAP_DUPLICATE_URLS", f"{n_dupes} URL(s) listed more than once in sitemaps.", dupes))
+            issues[-1].count = n_dupes
 
         in_sitemap = [r for r in rows if r["in_sitemap"]]
         groups = {
@@ -141,7 +172,16 @@ def site_issues(crawl: dict, rows: list[dict], states: dict[str, dict]) -> list[
             if urls:
                 issues.append(_issue(code, f"{len(urls)} sitemap URL(s) {labels[code]}.", urls))
 
-        if sitemap_urls:  # only meaningful when a sitemap exists
+        # Only conclusive when every sitemap file was read; a truncated read would produce false positives.
+        complete = bool(meta.get("read_complete"))
+        if sitemap_urls and not complete:
+            issues.append(_issue(
+                "SITEMAP_ANALYSIS_INCOMPLETE",
+                f"Sitemap analysis is incomplete ({meta.get('stop_reason') or 'unknown read status'}), so "
+                "missing-from-sitemap findings were not evaluated.",
+                value={k: meta.get(k) for k in ("discovered_sitemaps", "discovered_urls", "stop_reason",
+                                                 "failed_sitemaps", "limits")}))
+        elif sitemap_urls:
             missing = [r["url"] for r in rows if not r["in_sitemap"] and r["crawl_status"] == "ok"
                        and states[r["normalized_url"]]["indexable"]["value"]
                        and states[r["normalized_url"]]["canonical"]["value"]]
@@ -156,12 +196,15 @@ def site_issues(crawl: dict, rows: list[dict], states: dict[str, dict]) -> list[
     if noindex:
         issues.append(_issue("NOINDEX_PAGES", f"{len(noindex)} page(s) are noindex.", noindex))
 
-    broken = urls_where(lambda r, s: s["fetchable"]["value"] is False)
+    # Broken image/file URLs are reported by the link graph as BROKEN_RESOURCE_LINKS, not as pages.
+    def is_broken_doc(r, s):
+        return s["fetchable"]["value"] is False and (s.get("resource") or "document") == "document"
+    broken = urls_where(is_broken_doc)
     if broken:
-        issues.append(_issue("BROKEN_PAGES", f"{len(broken)} discovered URL(s) return errors or fail to load.",
+        issues.append(_issue("BROKEN_PAGES", f"{len(broken)} discovered page URL(s) return errors or fail to load.",
                              value=[{"url": r["url"], "reason": states[r["normalized_url"]]["fetchable"]["reason"],
                                      "linked_from": r["parent_url"]}
-                                    for r in rows if states[r["normalized_url"]]["fetchable"]["value"] is False][:_EXAMPLES]))
+                                    for r in rows if is_broken_doc(r, states[r["normalized_url"]])][:_EXAMPLES]))
         issues[-1].count = len(broken)
 
     blocked = urls_where(lambda r, s: s["crawlable"]["value"] is False)
@@ -177,15 +220,22 @@ def site_issues(crawl: dict, rows: list[dict], states: dict[str, dict]) -> list[
         issues.append(_issue("SOFT_404_CANDIDATES", f"{len(soft)} page(s) look like error pages but return 200.", soft))
 
     # Canonical pointing at something that cannot be indexed is critical; plain cross-URL canonicals are info.
-    bad_target = urls_where(lambda r, s: s["canonical"]["value"] is False and (
-        "private" in s["canonical"]["reason"] or "target is" in s["canonical"]["reason"]
-        or "not a valid" in s["canonical"]["reason"]))
+    bad_status = ("private_host", "target_not_indexable", "invalid")
+    bad_target = urls_where(lambda r, s: s["canonical"].get("status") in bad_status)
     if bad_target:
         bad = set(bad_target)
-        examples = sorted({states[r["normalized_url"]]["canonical"]["reason"] for r in rows if r["url"] in bad})
-        issues.append(_issue("CANONICAL_TO_NON_INDEXABLE",
-                             f"{len(bad_target)} page(s) have a canonical pointing to a URL that cannot be indexed.",
-                             bad_target, value={"urls": bad_target[:_EXAMPLES], "reasons": examples[:_EXAMPLES]}))
+        bad_rows = [r for r in rows if r["url"] in bad]
+        by_status = Counter(states[r["normalized_url"]]["canonical"]["status"] for r in bad_rows)
+        still_indexable = sum(1 for r in bad_rows if states[r["normalized_url"]]["indexable"]["value"])
+        examples = sorted({states[r["normalized_url"]]["canonical"]["reason"] for r in bad_rows})
+        issues.append(_issue(
+            "CANONICAL_TO_NON_INDEXABLE",
+            f"{len(bad_target)} page(s) declare a canonical URL search engines cannot use "
+            f"({', '.join(f'{n} {k}' for k, n in sorted(by_status.items()))}). {still_indexable} of these pages "
+            "are themselves fetchable and not noindex; the defect is the canonical declaration, which search "
+            "engines will likely ignore or which can send the wrong canonical signal.",
+            bad_target, value={"urls": bad_target[:_EXAMPLES], "reasons": examples[:_EXAMPLES],
+                               "canonical_status": dict(by_status), "pages_still_indexable": still_indexable}))
         issues[-1].count = len(bad_target)
     other = [u for u in urls_where(lambda r, s: s["canonical"]["value"] is False) if u not in bad_target]
     if other:
@@ -200,7 +250,33 @@ def summarize(states: dict[str, dict]) -> dict:
     for name in STATES:
         c = Counter({True: "true", False: "false", None: "unknown"}[s[name]["value"]] for s in states.values())
         out[name] = {"true": c["true"], "false": c["false"], "unknown": c["unknown"]}
+    out["canonical_status"] = dict(Counter(s["canonical"].get("status", "not_analyzed") for s in states.values()))
+    out["resource_type"] = dict(Counter(s.get("resource", "not_fetched") for s in states.values()))
     return out
+
+
+def url_counts(rows: list[dict]) -> dict:
+    """Explicit denominators. Every discovered/recorded URL falls in exactly one bucket."""
+    c = Counter()
+    for r in rows:
+        status, code = r["crawl_status"], r["status_code"] or 0
+        asset = resource_type(r["url"], r["content_type"], r["status_code"]) != "document"
+        if status == "blocked_robots":
+            c["blocked_by_robots"] += 1
+        elif status == "redirect":
+            c["redirects"] += 1
+        elif status == "error":
+            c["failed_requests"] += 1
+        elif asset or status == "non_html":
+            c["assets_broken" if code >= 400 else "assets_and_non_html_ok"] += 1
+        elif code >= 400:
+            c["html_error_pages"] += 1
+        else:
+            c["html_pages_ok"] += 1
+    keys = ("html_pages_ok", "html_error_pages", "assets_and_non_html_ok", "assets_broken", "redirects",
+            "failed_requests", "blocked_by_robots")
+    return {"recorded_urls": len(rows), **{k: c[k] for k in keys},
+            "broken_urls": c["html_error_pages"] + c["assets_broken"] + c["failed_requests"]}
 
 
 def apply(conn, crawl_id: int) -> None:
@@ -212,6 +288,6 @@ def apply(conn, crawl_id: int) -> None:
     conn.executemany("UPDATE crawl_pages SET indexability = ? WHERE id = ?",
                      [(store._dump(states[r["normalized_url"]]), r["id"]) for r in rows])
     issues = site_issues(crawl, rows, states)
-    stats = {**(crawl.get("stats") or {}), "indexability": summarize(states)}
+    stats = {**(crawl.get("stats") or {}), "indexability": summarize(states), "counts": url_counts(rows)}
     store.update(conn, "crawls", crawl_id, {"site_issues": [i.model_dump() for i in issues], "stats": stats})
     conn.commit()

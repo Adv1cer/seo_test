@@ -3,6 +3,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Response
 from app.models.request import CrawlOptions
 from app.services import store
 from app.services.crawler import create_crawl, run_crawl
+from app.services.report_context import report_context
 
 router = APIRouter(prefix="/api/seo/crawls", tags=["crawls"])
 
@@ -40,10 +41,13 @@ async def start(opts: CrawlOptions, background: BackgroundTasks, response: Respo
     stats = crawl.get("stats") or {}
     return {"success": crawl["status"] == "completed", "data": {
         "crawl_id": crawl_id, "status": crawl["status"], "error": crawl["error"], "root_url": crawl["root_url"],
-        "pages_crawled": stats.get("crawled_ok"), "duration_ms": stats.get("duration_ms"),
+        # pages_crawled = successfully fetched HTML pages (was: any fetched HTML response, incl. 404s)
+        "pages_crawled": (stats.get("counts") or {}).get("html_pages_ok", stats.get("crawled_ok")),
+        "duration_ms": stats.get("duration_ms"),
         "indexability": stats.get("indexability"), "architecture": stats.get("architecture"),
         "issues": issues["site_issues"] or [],
         "top_pages": architecture(crawl_id, limit=10)["data"]["top_authority_pages"],
+        **report_context(stats, issues["site_issues"] or []),
     }}
 
 
@@ -55,11 +59,16 @@ def get_crawl(crawl_id: int):
 
 @router.get("/{crawl_id}/pages")
 def list_pages(crawl_id: int, crawl_status: str | None = None, indexable: bool | None = None, limit: int = Query(100, ge=1, le=1000),
-               offset: int = Query(0, ge=0), include_audit: bool = False):
+               offset: int = Query(0, ge=0), include_audit: bool = False, issue: str | None = None):
+    """issue=CODE drills down from a page_issues rollup to every page whose audit has that issue."""
     conn = store.connect()
     _crawl_or_404(conn, crawl_id)
     cols = _PAGE_LIST_COLS + (", audit, render_info" if include_audit else "")
     where, args = "crawl_id = ?", [crawl_id]
+    if issue:
+        where += (" AND EXISTS (SELECT 1 FROM json_each(audit, '$.issues') "
+                  "WHERE json_extract(value, '$.code') = ?)")
+        args.append(issue)
     if crawl_status:
         where += " AND crawl_status = ?"
         args.append(crawl_status)
@@ -95,9 +104,10 @@ def list_issues(crawl_id: int):
     crawl = _crawl_or_404(conn, crawl_id)
     row = conn.execute("SELECT site_issues FROM crawls WHERE id = ?", (crawl_id,)).fetchone()
     issues = store.row_dict(row)["site_issues"]
-    return {"success": True, "data": {"status": crawl["status"],
-                                      "indexability": (crawl["stats"] or {}).get("indexability"),
-                                      "issues": issues if issues is not None else []}}
+    stats = crawl["stats"] or {}
+    return {"success": True, "data": {"status": crawl["status"], "indexability": stats.get("indexability"),
+                                      "issues": issues if issues is not None else [],
+                                      **report_context(stats, issues or [])}}
 
 
 _ARCH_FLAGS = ("orphan_candidate", "dead_end", "weak_internal_linking", "deep", "important_but_deep")

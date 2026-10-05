@@ -50,7 +50,8 @@ def test_graph_metrics_and_issues():
     assert B + "/gone" not in metrics  # error pages hold no authority
 
     assert codes["BROKEN_INTERNAL_LINKS"].value[0] == {"source": B + "/hub", "target": B + "/gone",
-                                                       "anchor": "x", "status": 404}
+                                                       "anchor": "x", "status": 404,
+                                                       "resource_type": "document"}
     assert codes["BROKEN_INTERNAL_LINKS"].severity == "critical"
     assert codes["REDIRECTED_INTERNAL_LINKS"].value[0]["redirects_to"] == B + "/hub"
     assert {"ORPHAN_PAGE_CANDIDATES", "DEAD_END_PAGES", "WEAKLY_LINKED_PAGES", "DEEP_PAGES",

@@ -90,6 +90,14 @@ class ParsedPage(BaseModel):
     word_count: int
     main_content_word_count: int
     word_count_is_approximate: bool
+    # Content extraction transparency (defaults keep older stored payloads valid).
+    detected_language: str = ""
+    language_signal: str = "unknown"
+    word_count_method: str = ""
+    content_word_count: int = 0           # body minus nav/header/footer/aside boilerplate
+    main_content_method: str = ""
+    main_content_ratio: float = 1.0       # main_content_word_count / content_word_count
+    main_content_confidence: Literal["high", "low"] = "high"
 
 
 class Issue(BaseModel):
@@ -146,6 +154,8 @@ class CrawlInfo(BaseModel):
     source: Literal["raw", "rendered"]
     raw_word_count: int
     rendered_word_count: int | None
+    # Where each head field was found: server_html | rendered_dom (only after JS) | missing.
+    metadata_source: dict[str, str] = {}
 
 
 class AuditData(BaseModel):
