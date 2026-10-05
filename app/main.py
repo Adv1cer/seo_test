@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.api.crawls import router as crawls_router
 from app.api.seo import router as seo_router
 from app.config import settings
 
@@ -51,3 +52,4 @@ def health():
 
 
 app.include_router(seo_router)
+app.include_router(crawls_router)

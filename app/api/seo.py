@@ -2,15 +2,14 @@ import json
 from typing import Literal
 from urllib.parse import parse_qs
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import PlainTextResponse
 from pydantic import ValidationError
 
-from app.config import settings
 from app.models.request import SeoRequest, UrlRequest
-from app.models.response import AuditData, AuditResponse, PageSummary, ParseResponse
+from app.models.response import AuditData, AuditResponse, PageSummary, ParseResponse, RenderMode
+from app.services.fetcher import FetchError, crawl_page
 from app.services.html_parser import parse_html
 from app.services.report import render_markdown
 from app.services.seo_auditor import audit_page
@@ -53,33 +52,27 @@ def parse(req: SeoRequest = Depends(read_seo_request)) -> ParseResponse:
     return ParseResponse(data=parse_html(req.url, req.html))
 
 
-def _audit_data(page) -> AuditData:
+def _audit_data(page, crawl=None) -> AuditData:
     summary = PageSummary(**page.model_dump(include=set(PageSummary.model_fields)))
-    return AuditData(page=summary, audit=audit_page(page))
+    return AuditData(page=summary, audit=audit_page(page, crawl=crawl), crawl=crawl)
 
 
-@router.post("/audit", response_model=AuditResponse)
+@router.post("/audit", response_model=AuditResponse, response_model_exclude={"data": {"crawl"}})
 def audit(req: SeoRequest = Depends(read_seo_request)) -> AuditResponse:
     return AuditResponse(data=_audit_data(parse_html(req.url, req.html)))
 
 
 @router.post("/extract", response_model=AuditResponse)
-def extract(req: UrlRequest) -> AuditResponse:
-    """Fetch a URL server-side and return the full SEO parse + audit. Use this instead
-    of a client-side extractor: just send {"url": "..."}."""
+def extract(req: UrlRequest, render: RenderMode = "auto") -> AuditResponse:
+    """Fetch a URL server-side (rendering with a browser only when needed) and return
+    the SEO parse + audit. Send {"url": "..."}; ?render=never|always overrides detection."""
     try:
-        resp = httpx.get(
-            req.url,
-            timeout=15,
-            follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; SeoAuditBot/1.0)"},
-        )
-        resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch {req.url}: {exc}")
-    if len(resp.content) > settings.max_html_bytes:
-        raise HTTPException(status_code=502, detail=f"Response from {req.url} exceeds {settings.max_html_bytes} bytes")
-    return AuditResponse(data=_audit_data(parse_html(req.url, resp.text)))
+        crawled = crawl_page(req.url, render)
+    except FetchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    if crawled.info.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"{req.url} returned HTTP {crawled.info.status_code}")
+    return AuditResponse(data=_audit_data(crawled.page, crawled.info))
 
 
 @router.post("/report")
@@ -90,4 +83,4 @@ def report(req: SeoRequest = Depends(read_seo_request), format: Literal["json", 
     md = render_markdown(page, data.audit)
     if format == "markdown":
         return PlainTextResponse(md, media_type="text/markdown; charset=utf-8")
-    return {"success": True, "data": {**data.model_dump(), "report_markdown": md}}
+    return {"success": True, "data": {**data.model_dump(exclude={"crawl"}), "report_markdown": md}}

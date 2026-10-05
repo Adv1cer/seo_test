@@ -11,6 +11,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
+data/
 
 # Local AI tooling (not needed on the server)
 .claude/

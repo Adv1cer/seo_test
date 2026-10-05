@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 LinkType = Literal["internal", "external", "anchor", "mailto", "tel", "javascript", "invalid"]
 Severity = Literal["critical", "warning", "info", "passed"]
+RenderMode = Literal["auto", "never", "always"]
 
 
 class Link(BaseModel):
@@ -129,9 +130,27 @@ class PageSummary(BaseModel):
     main_content_word_count: int
 
 
+class CrawlInfo(BaseModel):
+    status_code: int
+    final_url: str
+    content_type: str
+    x_robots_tag: str | None
+    http_duration_ms: int
+    render_mode: RenderMode
+    render_required: bool
+    render_reasons: list[str]
+    render_status: Literal["not_needed", "rendered", "failed", "skipped"]
+    render_duration_ms: int | None
+    render_error: str | None
+    source: Literal["raw", "rendered"]
+    raw_word_count: int
+    rendered_word_count: int | None
+
+
 class AuditData(BaseModel):
     page: PageSummary
     audit: Audit
+    crawl: CrawlInfo | None = None  # only set when the server fetched the page itself
 
 
 class ParseResponse(BaseModel):

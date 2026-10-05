@@ -36,7 +36,29 @@ RULES: dict[str, tuple[str, str, str]] = {
     "VERY_THIN_CONTENT": ("content", "warning", "Add substantially more useful content."),
     "THIN_CONTENT": ("content", "info", "Consider expanding the content."),
     "STRUCTURED_DATA_NOT_FOUND": ("structured_data", "info", "Consider adding JSON-LD structured data."),
+    "CONTENT_REQUIRES_JS": ("rendering", "warning", "Server-render (SSR/SSG/prerender) the main content, headings and links so crawlers see them without executing JavaScript."),
     "STRUCTURED_DATA_INVALID_JSON": ("structured_data", "warning", "Fix the malformed JSON-LD block(s)."),
+}
+
+# Site-level rules produced by the indexability engine after a crawl.
+SITE_RULES: dict[str, tuple[str, str, str]] = {
+    "SITEMAP_NOT_FOUND": ("sitemap", "warning", "Publish an XML sitemap and reference it from robots.txt with a Sitemap: line."),
+    "SITEMAP_EMPTY_OR_INVALID": ("sitemap", "critical", "The sitemap URL responds but is not a valid XML sitemap with <loc> entries. Serve a real XML sitemap (not the app's HTML fallback)."),
+    "SITEMAP_NOT_IN_ROBOTS": ("sitemap", "info", "Add a 'Sitemap: <url>' line to robots.txt so crawlers find the sitemap."),
+    "SITEMAP_URL_NON_200": ("sitemap", "warning", "Remove URLs that return errors from the sitemap, or fix the pages."),
+    "SITEMAP_URL_REDIRECT": ("sitemap", "warning", "List final destination URLs in the sitemap, not redirecting URLs."),
+    "SITEMAP_URL_NOINDEX": ("sitemap", "warning", "Remove noindex pages from the sitemap, or remove the noindex if they should rank."),
+    "SITEMAP_URL_CANONICALIZED": ("sitemap", "warning", "List only canonical URLs in the sitemap."),
+    "SITEMAP_URL_BLOCKED": ("sitemap", "warning", "Sitemap URLs are blocked by robots.txt; unblock them or remove them from the sitemap."),
+    "SITEMAP_DUPLICATE_URLS": ("sitemap", "info", "List each URL once across all sitemaps."),
+    "PAGES_MISSING_FROM_SITEMAP": ("sitemap", "warning", "Add indexable, self-canonical pages to the sitemap."),
+    "NOINDEX_PAGES": ("indexability", "info", "Confirm these pages are intentionally excluded from search."),
+    "CANONICALIZED_PAGES": ("indexability", "info", "Confirm these canonicals are intentional; they ask search engines to index another URL."),
+    "CANONICAL_TO_NON_INDEXABLE": ("indexability", "critical", "Point canonicals at a live (200), indexable URL on the public site."),
+    "SOFT_404_CANDIDATES": ("indexability", "warning", "Pages look like error pages but return 200. Return a real 404/410 status or add real content."),
+    "ROBOTS_BLOCKED_PAGES": ("indexability", "info", "Confirm robots.txt blocking is intentional; blocked pages cannot be crawled."),
+    "BROKEN_PAGES": ("indexability", "warning", "Fix or remove internal links to pages returning 4xx/5xx or failing to load."),
+    "RENDER_FAILED_PAGES": ("indexability", "warning", "Pages failed to render in a browser; check for JavaScript errors or blocked resources."),
 }
 
 # Check groups; a group with no fired issues yields one "passed" entry (<GROUP>_OK).

@@ -4,7 +4,7 @@ from collections import Counter
 from urllib.parse import urlsplit
 
 from app.config import Settings, settings as default_settings
-from app.models.response import Audit, Issue, ParsedPage
+from app.models.response import Audit, CrawlInfo, Issue, ParsedPage
 from app.rules.seo_rules import (GRADES, GROUPS, PENALTY_BASE, PENALTY_CAP, RULES,
                                  SEVERITY_ORDER)
 from app.services.url_utils import host_of, is_private_host, is_web_url, same_site
@@ -183,12 +183,25 @@ def grade_for(score: int) -> str:
     return next(name for threshold, name in GRADES if score >= threshold)
 
 
-def audit_page(page: ParsedPage, s: Settings = default_settings) -> Audit:
+def _check_rendering(info: CrawlInfo, c: _Collector, s: Settings) -> None:
+    if info.source == "rendered" and info.raw_word_count < s.render_min_words:
+        c.add("CONTENT_REQUIRES_JS",
+              f"Server HTML has {info.raw_word_count} words; content only appears after JavaScript "
+              f"rendering ({info.rendered_word_count} words).",
+              {"raw_word_count": info.raw_word_count, "rendered_word_count": info.rendered_word_count})
+
+
+def audit_page(page: ParsedPage, s: Settings = default_settings, crawl: CrawlInfo | None = None) -> Audit:
+    """crawl is only known when the server fetched the page; it enables the rendering group."""
     c = _Collector()
     for check in CHECKS:
         check(page, c, s)
+    groups = GROUPS
+    if crawl is not None:
+        _check_rendering(crawl, c, s)
+        groups = GROUPS + ["rendering"]
     fired = {i.category for i in c.issues}
-    for group in GROUPS:
+    for group in groups:
         if group not in fired:
             c.issues.append(Issue(code=f"{group.upper()}_OK", category=group, severity="passed",
                                   message=f"All {group.replace('_', ' ')} checks passed.", recommendation=""))

@@ -1,6 +1,6 @@
 """URL resolution / classification helpers. Pure functions, no network access."""
 import ipaddress
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 WEB_SCHEMES = ("http", "https")
 
@@ -97,3 +97,23 @@ def classify_link(page_url: str, href: str | None) -> tuple[str, str | None]:
     if urlsplit(absolute).fragment and normalize(absolute) == normalize(page_url):
         return "anchor", absolute
     return ("internal" if same_site(absolute, page_url) else "external"), absolute
+
+
+TRACKING_PARAMS = {"gclid", "fbclid", "msclkid", "dclid", "yclid", "mc_cid", "mc_eid", "_ga", "_gl",
+                   "igshid", "ref_src", "spm"}
+
+
+def crawl_key(url: str) -> str:
+    """normalize() plus crawl de-duplication: drop tracking params (utm_* etc.), drop
+    duplicate keys (first wins), sort the query so ?a=1&b=2 == ?b=2&a=1."""
+    norm = normalize(url)
+    parts = urlsplit(norm)
+    if not parts.query:
+        return norm
+    seen, params = set(), []
+    for k, v in parse_qsl(parts.query, keep_blank_values=True):
+        if k.lower().startswith("utm_") or k.lower() in TRACKING_PARAMS or k in seen:
+            continue
+        seen.add(k)
+        params.append((k, v))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(sorted(params)), ""))

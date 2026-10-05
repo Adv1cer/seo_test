@@ -15,6 +15,9 @@ class Settings:
     meta_desc_max: int = _int("SEO_META_DESC_MAX", 160)
     very_thin_words: int = _int("SEO_VERY_THIN_WORDS", 100)
     thin_words: int = _int("SEO_THIN_WORDS", 300)
+    render_min_words: int = _int("SEO_RENDER_MIN_WORDS", 50)
+    render_concurrency: int = _int("SEO_RENDER_CONCURRENCY", 2)
+    db_path: str = os.environ.get("SEO_DB_PATH", "data/seo.db")
 
 
 settings = Settings()
